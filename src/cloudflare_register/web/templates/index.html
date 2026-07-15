@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Hosts · cloudflare-register{% endblock %}
+{% block nav %}
+  <a href="/wizard">Add host</a>
+  <form method="post" action="/logout" style="display:inline">
+    <input type="hidden" name="csrf_token" value="">
+    <button type="submit">Logout</button>
+  </form>
+{% endblock %}
+{% block body %}
+<h2>Managed hosts ({{ host_groups|length }} group{{ "" if host_groups|length == 1 else "s" }})</h2>
+
+{% for group_name, hosts in host_groups.items() %}
+  <section>
+    <h3>
+      Group: <code>{{ group_name }}</code>
+      {% if interface_map.get(group_name) %}
+        <small>interface: <code>{{ interface_map[group_name] }}</code></small>
+      {% else %}
+        <small>interface: <em>default route</em></small>
+      {% endif %}
+      <small>({{ hosts|length }} host{{ "" if hosts|length == 1 else "s" }})</small>
+    </h3>
+    <table>
+      <thead><tr><th>Hostname</th><th>Zone</th><th>Proxied</th><th></th></tr></thead>
+      <tbody>
+        {% for host in hosts %}
+          <tr>
+            <td><code>{{ host.hostname }}</code></td>
+            <td>{{ host.zone_name }}</td>
+            <td>{{ "yes" if host.proxied else "no" }}</td>
+            <td>
+              <form method="post" action="/delete-host" style="display:inline">
+                <input type="hidden" name="hostname" value="{{ host.hostname }}">
+                <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_value }}">
+                <button type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% else %}
+  <p><em>No hosts configured yet. Use the <a href="/wizard">wizard</a> to add one.</em></p>
+{% endfor %}
+{% endblock %}

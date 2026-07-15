@@ -1,0 +1,67 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+eggs/
+parts/
+sdist/
+wheels/
+pip-wheel-metadata/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+.activate
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.cache
+junit.xml
+.tap
+.xml
+.subunit
+
+# Ruff / mypy / other tools
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# IDE and editor metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# JetBrains AI config
+.junie/
+
+# Application runtime
+data/
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Generated TUI/web assets if added later
+static/

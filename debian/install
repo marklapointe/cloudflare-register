@@ -1,0 +1,3 @@
+src/cloudflare_register usr/lib/python3/dist-packages/
+deploy/cloudflare-ddns.service lib/systemd/system/
+deploy/cloudflare-register.env.example etc/cloudflare-register/

@@ -1,0 +1,40 @@
+[Unit]
+Description=cloudflare-register (smart Cloudflare DynDNS)
+Documentation=https://github.com/cloudbsdorg/cloudflare-register
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cloudflare-ddns
+Group=cloudflare-ddns
+WorkingDirectory=/usr/lib/cloudflare-register
+Environment=PYTHONPATH=/usr/lib/cloudflare-register
+# cloudflare-register reads its JSON config from /etc/cloudflare-register.json
+# directly (Honcho application guidelines require JSON for machine interfaces;
+# systemd's EnvironmentFile= is KEY=VALUE shell format only). Pass the path
+# explicitly so operators can override without editing the unit.
+Environment=CLOUDFLARE_REGISTER_CONFIG=/etc/cloudflare-register.json
+ExecStart=/usr/bin/python3 -m cloudflare_register service
+Restart=on-failure
+RestartSec=10
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cloudflare-register /var/log/cloudflare-register
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

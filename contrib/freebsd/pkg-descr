@@ -1,0 +1,7 @@
+cloudflare-register is a smart Dynamic DNS service for Cloudflare.
+
+It manages multiple hostnames across multiple Cloudflare zones, supports
+dual-stack (IPv4 + IPv6) with auto-detection and state synchronization, and
+exposes a JWT-protected web UI plus a Textual-based TUI dashboard for
+keyboard-driven operation. A cron-friendly `sync --once` mode lets the
+service run on hosts without a system service supervisor.

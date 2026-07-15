@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Add host · cloudflare-register{% endblock %}
+{% block nav %}<a href="/">Dashboard</a>{% endblock %}
+{% block body %}
+<h2>Add host</h2>
+
+<section>
+  <h3>Step 1: load zones</h3>
+  <form method="post" action="/wizard/zone">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_value }}">
+    <button type="submit">Load zones from Cloudflare</button>
+  </form>
+</section>
+
+{% if interface_groups %}
+<section>
+  <h3>Interface groups</h3>
+  <ul>
+    {% for g in interface_groups %}
+      <li>
+        <code>{{ g.name }}</code> → interface <code>{{ g.interface_name or "(default route)" }}</code>
+        {% if g.description %}<small>— {{ g.description }}</small>{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section>
+  <h3>Step 2: register a new interface group</h3>
+  <form method="post" action="/register-group">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_value }}">
+    <label>Group name <input name="name" required placeholder="home-wan"></label>
+    <label>Interface
+      <select name="interface_name">
+        <option value="">(use OS default route)</option>
+        {% for iface in interfaces %}
+          <option value="{{ iface.name }}">{{ iface.name }} ({{ iface.primary_ipv4 or "-" }})</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Description <input name="description" placeholder="optional"></label>
+    <button type="submit">Register group</button>
+  </form>
+</section>
+
+{% if zones %}
+<section>
+  <h3>Step 3: add one host</h3>
+  <form method="post" action="/add-host">
+    <label>Zone
+      <select name="zone_id" required>
+        {% for zone in zones %}
+          <option value="{{ zone.id }}">{{ zone.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <input type="hidden" name="zone_name" value="">
+    <label>Hostname <input name="hostname" placeholder="box.example.com" required></label>
+    <label>Interface group
+      <select name="interface_group">
+        <option value="">(no group)</option>
+        {% for g in interface_groups %}
+          <option value="{{ g.name }}">{{ g.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label><input type="checkbox" name="proxied" value="true"> Proxy through Cloudflare</label>
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_value }}">
+    <button type="submit">Save</button>
+  </form>
+
+  <h3>Step 4: bulk add many hostnames</h3>
+  <form method="post" action="/add-hosts-bulk">
+    <label>Zone
+      <select name="zone_id" required>
+        {% for zone in zones %}
+          <option value="{{ zone.id }}">{{ zone.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <input type="hidden" name="zone_name" value="">
+    <label>Hostnames (one per line)
+      <textarea name="hostnames" rows="6" placeholder="a.example.com&#10;b.example.com&#10;c.example.com" required></textarea>
+    </label>
+    <label>Interface group
+      <select name="interface_group">
+        <option value="">(no group)</option>
+        {% for g in interface_groups %}
+          <option value="{{ g.name }}">{{ g.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label><input type="checkbox" name="proxied" value="true"> Proxy through Cloudflare</label>
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_value }}">
+    <button type="submit">Save all</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

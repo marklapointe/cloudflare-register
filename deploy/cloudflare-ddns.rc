@@ -1,0 +1,63 @@
+#!/bin/sh
+#
+# PROVIDE: cloudflare_ddns
+# REQUIRE: DAEMON NETWORKING
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+#
+# Add the following to /etc/rc.conf to enable this service:
+#
+#   cloudflare_ddns_enable="YES"
+#
+# Optional tunables (with defaults):
+#
+#   cloudflare_ddns_user="cloudflare-ddns"
+#   cloudflare_ddns_chdir="/usr/local/www/cloudflare-register"
+#   cloudflare_ddns_python="/usr/local/bin/python3.11"
+#   cloudflare_ddns_config="/usr/local/etc/cloudflare-register/cloudflare-register.json"
+#
+# The config file is JSON (Honcho application guidelines: JSON is the preferred
+# config format for machine interfaces). The Python service reads it directly
+# via the CLOUDFLARE_REGISTER_CONFIG env var.
+#
+. /etc/rc.subr
+
+name="cloudflare_ddns"
+rcvar="${name}_enable"
+
+load_rc_config "$name"
+
+: "${cloudflare_ddns_enable:="NO"}"
+: "${cloudflare_ddns_user:="cloudflare-ddns"}"
+: "${cloudflare_ddns_chdir:="/usr/local/www/cloudflare-register"}"
+: "${cloudflare_ddns_python:="/usr/local/bin/python3.11"}"
+: "${cloudflare_ddns_config:="/usr/local/etc/cloudflare-register/cloudflare-register.json"}"
+
+pidfile="/var/run/${name}.pid"
+logfile="/var/log/${name}.log"
+required_files="${cloudflare_ddns_chdir}/src/cloudflare_register/__init__.py"
+command="${cloudflare_ddns_python}"
+command_args="-m cloudflare_register service"
+procname="${command}"
+
+start_precmd="${name}_prestart"
+
+cloudflare_ddns_prestart()
+{
+    if [ ! -d "${cloudflare_ddns_chdir}" ]; then
+        err 1 "${cloudflare_ddns_chdir} does not exist"
+    fi
+    if [ ! -r "${cloudflare_ddns_config}" ]; then
+        warn "${cloudflare_ddns_config} not readable; run 'cloudflare-register init --system' first"
+    fi
+    export CLOUDFLARE_REGISTER_CONFIG="${cloudflare_ddns_config}"
+    install -d -o "${cloudflare_ddns_user}" -m 0750 \
+        "$(dirname "${pidfile}")" 2>/dev/null || \
+        warn "cannot chown $(dirname "${pidfile}"); ensure rc.d starts as root"
+    install -d -o "${cloudflare_ddns_user}" -m 0750 \
+        "$(dirname "${logfile}")" 2>/dev/null || true
+    touch "${logfile}"
+    chown "${cloudflare_ddns_user}" "${logfile}" 2>/dev/null || true
+}
+
+run_rc_command "$1"

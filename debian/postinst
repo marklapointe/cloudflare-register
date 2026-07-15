@@ -1,0 +1,26 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        if ! getent passwd cloudflare-ddns >/dev/null; then
+            adduser --system --no-create-home --shell /usr/sbin/nologin \
+                --group --gecos 'cloudflare-register service account' \
+                cloudflare-ddns
+        fi
+        chown -R cloudflare-ddns:cloudflare-ddns /var/lib/cloudflare-register
+        chmod 0750 /var/lib/cloudflare-register
+        if [ ! -f /etc/cloudflare-register/cloudflare-register.env ]; then
+            cp -a /etc/cloudflare-register/cloudflare-register.env.example \
+                  /etc/cloudflare-register/cloudflare-register.env
+            chown cloudflare-ddns:cloudflare-ddns /etc/cloudflare-register/cloudflare-register.env
+            chmod 0640 /etc/cloudflare-register/cloudflare-register.env
+            echo "Wrote /etc/cloudflare-register/cloudflare-register.env"
+            echo "Edit it and run: systemctl enable --now cloudflare-ddns"
+        fi
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0
