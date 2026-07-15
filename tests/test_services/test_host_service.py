@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import pytest
 
+from cloudflare_register.domain import HostConfig
 from cloudflare_register.exceptions import PersistenceError
 from cloudflare_register.services import HostService
-from cloudflare_register.domain import HostConfig, InterfaceGroup
 
 ZONE = "abcdef0123456789abcdef0123456789"
 
@@ -50,7 +50,11 @@ def test_bulk_add_with_group(service_storage):
     assert len(result.added) == 3
     assert result.skipped == []
     in_group = svc.hosts_in_group("vpn-tunnel")
-    assert {h.hostname for h in in_group} == {"one.example.com", "two.example.com", "three.example.com"}
+    assert {h.hostname for h in in_group} == {
+        "one.example.com",
+        "two.example.com",
+        "three.example.com",
+    }
 
 
 def test_bulk_add_skips_duplicates(service_storage):
@@ -112,5 +116,6 @@ def service_storage(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
     yield

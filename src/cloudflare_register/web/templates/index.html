@@ -3,7 +3,7 @@
 {% block nav %}
   <a href="/wizard">Add host</a>
   <form method="post" action="/logout" style="display:inline">
-    <input type="hidden" name="csrf_token" value="">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_value }}">
     <button type="submit">Logout</button>
   </form>
 {% endblock %}

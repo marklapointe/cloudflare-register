@@ -17,9 +17,11 @@ Library choice (researched 2026-07):
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -54,13 +56,13 @@ def _udp_local_ip(family: int) -> str | None:
         sock.close()
         return None
     try:
-        return sock.getsockname()[0]
+        return str(sock.getsockname()[0])
     finally:
         sock.close()
 
 
 def _find_interface_for_address(
-    addresses: dict[str, Iterable], target: str | None
+    addresses: dict[str, Iterable[Any]], target: str | None
 ) -> str | None:
     """Reverse-lookup: given a local IP, return the interface name that owns it.
 
@@ -71,25 +73,33 @@ def _find_interface_for_address(
         return None
     for name, addrs in addresses.items():
         for addr in addrs:
-            if getattr(addr, "address", None) == target:
+            candidate = getattr(addr, "address", None)
+            if candidate and candidate.split("%", 1)[0] == target:
                 return name
     return None
 
 
-def _split_addresses(addrs: Iterable) -> tuple[list[str], list[str]]:
-    """Separate v4/v6 addresses, excluding loopback and link-local v6."""
+def _split_addresses(addrs: Iterable[Any]) -> tuple[list[str], list[str]]:
+    """Separate v4/v6 addresses, excluding loopback and link-local.
+
+    psutil may report IPv6 addresses with a ``%scope`` suffix; that suffix is
+    stripped so the values compare equal to what ``getsockname`` returns.
+    """
     v4: list[str] = []
     v6: list[str] = []
     for addr in addrs:
-        if addr.family == socket.AF_INET and addr.address and not addr.address.startswith("127."):
-            v4.append(addr.address)
-        elif (
-            addr.family == socket.AF_INET6
-            and addr.address
-            and not addr.address.startswith("::1")
-            and not addr.address.startswith("fe80")
-        ):
-            v6.append(addr.address)
+        raw = getattr(addr, "address", None)
+        if not raw:
+            continue
+        bare = raw.split("%", 1)[0]
+        try:
+            parsed = ipaddress.ip_address(bare)
+        except ValueError:
+            continue
+        if addr.family == socket.AF_INET and not parsed.is_loopback:
+            v4.append(bare)
+        elif addr.family == socket.AF_INET6 and not (parsed.is_loopback or parsed.is_link_local):
+            v6.append(bare)
     return v4, v6
 
 
@@ -108,7 +118,8 @@ class InterfaceService:
         interfaces: list[InterfaceInfo] = []
         for name, addrs in psutil.net_if_addrs().items():
             v4, v6 = _split_addresses(addrs)
-            is_up = bool(stats_by_name.get(name).isup) if name in stats_by_name else True
+            stats = stats_by_name.get(name)
+            is_up = bool(stats.isup) if stats is not None else True
             interfaces.append(InterfaceInfo(name=name, ipv4=tuple(v4), ipv6=tuple(v6), is_up=is_up))
         interfaces.sort(key=lambda i: (not i.is_up, i.name))
         return interfaces

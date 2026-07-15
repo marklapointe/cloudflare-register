@@ -1,3 +1,2 @@
-etc/cloudflare-register
 var/lib/cloudflare-register
 var/log/cloudflare-register

@@ -4,8 +4,14 @@ include /usr/share/dpkg/default.mk
 
 export DH_VERBOSE = 1
 export PYBUILD_NAME = cloudflare-register
-export PYBUILD_SYSTEM = pep517
-export PYBUILD_DISABLE_python3 = test
+export PYBUILD_DISABLE = test
 
+# The python3 sequence is pulled in via dh-sequence-python3 in Build-Depends,
+# so no --with python3 is needed here.
 %:
-	dh $@ --with python3 --buildsystem=pep517
+	dh $@ --buildsystem=pybuild
+
+# The systemd unit is named cloudflare-ddns rather than after the package,
+# so point dh_installsystemd at debian/cloudflare-register.cloudflare-ddns.service.
+override_dh_installsystemd:
+	dh_installsystemd --name=cloudflare-ddns

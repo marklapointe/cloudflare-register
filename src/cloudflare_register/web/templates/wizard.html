@@ -49,13 +49,12 @@
   <h3>Step 3: add one host</h3>
   <form method="post" action="/add-host">
     <label>Zone
-      <select name="zone_id" required>
+      <select name="zone" required>
         {% for zone in zones %}
-          <option value="{{ zone.id }}">{{ zone.name }}</option>
+          <option value="{{ zone.id }}:{{ zone.name }}">{{ zone.name }}</option>
         {% endfor %}
       </select>
     </label>
-    <input type="hidden" name="zone_name" value="">
     <label>Hostname <input name="hostname" placeholder="box.example.com" required></label>
     <label>Interface group
       <select name="interface_group">
@@ -73,13 +72,12 @@
   <h3>Step 4: bulk add many hostnames</h3>
   <form method="post" action="/add-hosts-bulk">
     <label>Zone
-      <select name="zone_id" required>
+      <select name="zone" required>
         {% for zone in zones %}
-          <option value="{{ zone.id }}">{{ zone.name }}</option>
+          <option value="{{ zone.id }}:{{ zone.name }}">{{ zone.name }}</option>
         {% endfor %}
       </select>
     </label>
-    <input type="hidden" name="zone_name" value="">
     <label>Hostnames (one per line)
       <textarea name="hostnames" rows="6" placeholder="a.example.com&#10;b.example.com&#10;c.example.com" required></textarea>
     </label>

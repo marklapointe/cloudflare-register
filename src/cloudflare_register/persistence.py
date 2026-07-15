@@ -49,7 +49,8 @@ import fcntl
 import json
 import os
 import tempfile
-from collections.abc import Iterator
+import threading
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -72,7 +73,7 @@ class HostConfig(DomainHostConfig):
     migration layer strips unknown fields on save.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", validate_assignment=True)
 
 
 def _resolve_storage_path() -> Path:
@@ -81,22 +82,66 @@ def _resolve_storage_path() -> Path:
     return settings.data_dir / "hosts.json"
 
 
+# flock exclusion is per open-file-description, so a naive nested acquire in
+# the same process would deadlock. Track held locks per path and re-enter.
+_LOCK_STATE: dict[str, tuple[int, int]] = {}  # path -> (fd, depth)
+_LOCK_STATE_GUARD = threading.Lock()
+
+
 @contextmanager
 def _file_lock(path: Path) -> Iterator[Path]:
-    """Hold an exclusive flock on ``path.lock`` while we write.
+    """Hold an exclusive flock on ``path.lock``; reentrant within this process.
 
     The lock file lives next to the data file. Lock is released when the
-    context manager exits, even on exception.
+    outermost context manager exits, even on exception.
     """
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    lock_path.touch(exist_ok=True)
-    fd = os.open(lock_path, os.O_RDWR)
+    key = str(path)
+    with _LOCK_STATE_GUARD:
+        held = _LOCK_STATE.get(key)
+        if held is not None:
+            fd, depth = held
+            _LOCK_STATE[key] = (fd, depth + 1)
+            acquired = False
+        else:
+            lock_path = path.with_suffix(path.suffix + ".lock")
+            lock_path.touch(exist_ok=True)
+            fd = os.open(lock_path, os.O_RDWR)
+            acquired = True
+    if acquired:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # may block: taken outside the guard
+        with _LOCK_STATE_GUARD:
+            _LOCK_STATE[key] = (fd, 1)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
         yield path
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        with _LOCK_STATE_GUARD:
+            fd, depth = _LOCK_STATE[key]
+            if depth > 1:
+                _LOCK_STATE[key] = (fd, depth - 1)
+            else:
+                del _LOCK_STATE[key]
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+
+@contextmanager
+def hosts_mutation_lock() -> Iterator[None]:
+    """Hold the hosts-file lock across a whole read-modify-write sequence.
+
+    ``load_hosts_config``/``save_hosts_config`` each lock individually, which
+    protects the file from torn writes but not from lost updates when two
+    callers interleave load → mutate → save. Mutating callers must wrap the
+    sequence in this context manager.
+    """
+    with _file_lock(_resolve_storage_path()):
+        yield
+
+
+@contextmanager
+def groups_mutation_lock() -> Iterator[None]:
+    """Same as :func:`hosts_mutation_lock`, for the interface-group index."""
+    with _file_lock(_resolve_groups_path()):
+        yield
 
 
 def load_hosts_config() -> list[HostConfig]:
@@ -121,7 +166,7 @@ def load_hosts_config() -> list[HostConfig]:
     return hosts
 
 
-def save_hosts_config(hosts: list[HostConfig]) -> None:
+def save_hosts_config(hosts: Sequence[DomainHostConfig]) -> None:
     """Persist the host list atomically.
 
     The function creates the parent directory if missing, writes to a tempfile

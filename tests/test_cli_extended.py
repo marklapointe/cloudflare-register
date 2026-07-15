@@ -9,9 +9,8 @@ require network access.
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,7 +20,6 @@ from cloudflare_register.cli import main
 from cloudflare_register.domain import HostConfig
 from cloudflare_register.providers import factory as provider_factory
 from cloudflare_register.providers.base import DnsRecord, Provider
-
 
 ZONE = "abcdef0123456789abcdef0123456789"
 
@@ -45,7 +43,7 @@ class _CapturingProvider(Provider):
     async def list_records(self, zone_id, name):
         return []
 
-    async def create_record(self, zone_id, record_type, name, content, proxied=False):
+    async def create_record(self, zone_id, record_type, name, content, proxied=False, *, ttl=1):
         self.created.append((zone_id, record_type, name, content, proxied))
         return DnsRecord(
             record_id=f"new-{len(self.created)}",
@@ -55,7 +53,9 @@ class _CapturingProvider(Provider):
             proxied=proxied,
         )
 
-    async def update_record(self, zone_id, record_id, record_type, name, content, proxied=False):
+    async def update_record(
+        self, zone_id, record_id, record_type, name, content, proxied=False, *, ttl=1
+    ):
         self.updated.append((zone_id, record_id, record_type, name, content, proxied))
         return DnsRecord(
             record_id=record_id,
@@ -110,6 +110,7 @@ def test_check_config_success(runner, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
     r = runner.invoke(main, ["check-config"])
     assert "config OK" in r.output
@@ -122,6 +123,7 @@ def test_check_config_insecure_warns(runner, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
     r = runner.invoke(main, ["check-config"])
     assert "insecure defaults" in r.output
@@ -162,12 +164,6 @@ def test_init_with_force_overwrites(runner, tmp_path, monkeypatch):
     assert "secret_key" in body
 
 
-def test_init_system_and_path_conflict(runner):
-    r = runner.invoke(main, ["init", "--system", "--path", "/tmp/cfr-test.conf"])
-    assert r.exit_code == 2
-    assert "mutually exclusive" in r.output
-
-
 def test_init_with_path(runner, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     target = tmp_path / "custom.conf"
@@ -176,38 +172,38 @@ def test_init_with_path(runner, tmp_path, monkeypatch):
     assert target.exists()
 
 
-def test_init_system_and_path_conflict(runner):
+def test_init_system_and_path_conflict(runner, tmp_path):
     """--system and --path are mutually exclusive."""
-    r = runner.invoke(main, ["init", "--system", "--path", "/tmp/cfr-no-such-target.json"])
+    r = runner.invoke(main, ["init", "--system", "--path", str(tmp_path / "target.json")])
     assert r.exit_code == 2
     assert "mutually exclusive" in r.output
 
 
-def test_init_system_creates_system_file(monkeypatch, runner):
-    """--system writes to /etc/cloudflare-register.json (root required).
-    Skip this test if we can't actually write to /etc/."""
-    import os
+def test_init_system_creates_system_file(monkeypatch, runner, tmp_path):
+    """--system writes the system config path with mode 0600.
 
-    if os.geteuid() != 0 and not _has_passwordless_sudo():
-        pytest.skip("requires root or passwordless sudo to write /etc/cloudflare-register.json")
+    The destination is redirected into ``tmp_path`` — tests must never
+    touch the real ``/etc``.
+    """
+    target = tmp_path / "etc" / "cloudflare-register.json"
+    target.parent.mkdir()
+    monkeypatch.setattr("cloudflare_register.cli.SYSTEM_CONFIG_PATH", target)
     r = runner.invoke(main, ["init", "--system"])
-    assert r.exit_code == 0
-    assert Path("/etc/cloudflare-register.json").exists()
+    assert r.exit_code == 0, r.output
+    assert target.exists()
+    assert (target.stat().st_mode & 0o777) == 0o600
+    body = json.loads(target.read_text())
+    assert "secret_key" in body
 
 
-def _has_passwordless_sudo() -> bool:
-    """Return True if `sudo -n true` succeeds without a password prompt."""
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["sudo", "-n", "true"],
-            capture_output=True,
-            timeout=2,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+def test_init_system_existing_file_requires_force(monkeypatch, runner, tmp_path):
+    target = tmp_path / "cloudflare-register.json"
+    target.write_text("{}")
+    monkeypatch.setattr("cloudflare_register.cli.SYSTEM_CONFIG_PATH", target)
+    r = runner.invoke(main, ["init", "--system"])
+    assert r.exit_code == 2
+    assert "already exists" in r.output
+    assert target.read_text() == "{}"
 
 
 def test_hosts_empty(runner, tmp_path, monkeypatch):
@@ -217,6 +213,7 @@ def test_hosts_empty(runner, tmp_path, monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "y" * 48)
     monkeypatch.setenv("ADMIN_PASSWORD", "very-secret-test-password")
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
     r = runner.invoke(main, ["hosts"])
     assert "no hosts managed" in r.output
@@ -229,8 +226,10 @@ def test_hosts_lists_hosts(runner, tmp_path, monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "y" * 48)
     monkeypatch.setenv("ADMIN_PASSWORD", "very-secret-test-password")
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
     from cloudflare_register.services import HostService
+
     HostService().add_host(
         HostConfig(
             hostname="a.example.com",
@@ -251,11 +250,21 @@ def test_hosts_with_group_filter(runner, tmp_path, monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "y" * 48)
     monkeypatch.setenv("ADMIN_PASSWORD", "very-secret-test-password")
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
     from cloudflare_register.services import HostService
+
     svc = HostService()
-    svc.add_host(HostConfig(hostname="a.example.com", zone_id=ZONE, zone_name="example.com", interface_group="wan"))
-    svc.add_host(HostConfig(hostname="b.example.com", zone_id=ZONE, zone_name="example.com", interface_group="vpn"))
+    svc.add_host(
+        HostConfig(
+            hostname="a.example.com", zone_id=ZONE, zone_name="example.com", interface_group="wan"
+        )
+    )
+    svc.add_host(
+        HostConfig(
+            hostname="b.example.com", zone_id=ZONE, zone_name="example.com", interface_group="vpn"
+        )
+    )
     r = runner.invoke(main, ["hosts", "--group", "wan"])
     assert "a.example.com" in r.output
     assert "b.example.com" not in r.output
@@ -273,14 +282,18 @@ def test_sync_once_success(runner, capturing_provider, tmp_path, monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "x" * 48)
     monkeypatch.setenv("ADMIN_PASSWORD", "very-secret-test-password")
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
     from cloudflare_register.services import HostService
-    HostService().add_host(HostConfig(hostname="a.example.com", zone_id=ZONE, zone_name="example.com"))
 
-    async def _v4():
+    HostService().add_host(
+        HostConfig(hostname="a.example.com", zone_id=ZONE, zone_name="example.com")
+    )
+
+    async def _v4(source_ip=None):
         return "203.0.113.10"
 
-    async def _v6():
+    async def _v6(source_ip=None):
         return None
 
     monkeypatch.setattr("cloudflare_register.services.sync_service.get_public_ipv4", _v4)
@@ -297,16 +310,26 @@ def test_sync_with_group_filter(runner, capturing_provider, tmp_path, monkeypatc
     monkeypatch.setenv("SECRET_KEY", "x" * 48)
     monkeypatch.setenv("ADMIN_PASSWORD", "very-secret-test-password")
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
     from cloudflare_register.services import HostService
-    svc = HostService()
-    svc.add_host(HostConfig(hostname="a.example.com", zone_id=ZONE, zone_name="example.com", interface_group="wan"))
-    svc.add_host(HostConfig(hostname="b.example.com", zone_id=ZONE, zone_name="example.com", interface_group="vpn"))
 
-    async def _v4():
+    svc = HostService()
+    svc.add_host(
+        HostConfig(
+            hostname="a.example.com", zone_id=ZONE, zone_name="example.com", interface_group="wan"
+        )
+    )
+    svc.add_host(
+        HostConfig(
+            hostname="b.example.com", zone_id=ZONE, zone_name="example.com", interface_group="vpn"
+        )
+    )
+
+    async def _v4(source_ip=None):
         return "203.0.113.10"
 
-    async def _v6():
+    async def _v6(source_ip=None):
         return None
 
     monkeypatch.setattr("cloudflare_register.services.sync_service.get_public_ipv4", _v4)
@@ -322,6 +345,7 @@ def test_sync_no_hosts_exits_zero(runner, tmp_path, monkeypatch, capturing_provi
     monkeypatch.setenv("SECRET_KEY", "x" * 48)
     monkeypatch.setenv("ADMIN_PASSWORD", "very-secret-test-password")
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
     r = runner.invoke(main, ["sync", "--once"])
     # No hosts configured → empty cycle → exit 0.
@@ -337,9 +361,9 @@ def test_service_command_invokes_uvicorn(runner, tmp_path, monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "y" * 48)
     monkeypatch.setenv("ADMIN_PASSWORD", "very-secret-test-password")
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
 
-    import asyncio
     import uvicorn
 
     server_calls: list[dict] = []
@@ -363,6 +387,7 @@ def test_service_command_invokes_uvicorn(runner, tmp_path, monkeypatch):
         return _coro()
 
     from cloudflare_register.services import SyncService
+
     monkeypatch.setattr(SyncService, "run_forever", fake_run_forever)
 
     try:
@@ -382,6 +407,7 @@ def test_web_command_invokes_uvicorn(runner, tmp_path, monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "y" * 48)
     monkeypatch.setenv("ADMIN_PASSWORD", "very-secret-test-password")
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
     import uvicorn
 
@@ -406,6 +432,7 @@ def test_tui_command_runs_or_errors_on_import(monkeypatch, runner, tmp_path):
     monkeypatch.setenv("SECRET_KEY", "y" * 48)
     monkeypatch.setenv("ADMIN_PASSWORD", "very-secret-test-password")
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
 
     from cloudflare_register.tui import app as tui_app_module
@@ -417,8 +444,6 @@ def test_tui_command_runs_or_errors_on_import(monkeypatch, runner, tmp_path):
         raise SystemExit(0)
 
     monkeypatch.setattr(tui_app_module.CloudflareRegisterTUI, "run", fake_run)
-    try:
-        r = runner.invoke(main, ["tui"])
-    except SystemExit:
-        pass
+    with contextlib.suppress(SystemExit):
+        runner.invoke(main, ["tui"])
     assert len(called) == 1

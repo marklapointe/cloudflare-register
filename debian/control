@@ -2,15 +2,14 @@ Source: cloudflare-register
 Section: net
 Priority: optional
 Maintainer: Mark LaPointe <mark@cloudbsd.org>
-Standards-Version: 4.6.2
+Standards-Version: 4.7.0
 Build-Depends:
  debhelper-compat (= 13),
+ dh-python,
  dh-sequence-python3,
- pyproject-tools,
+ pybuild-plugin-pyproject,
  python3-all,
  python3-setuptools,
- python3-build,
- python3-installer
 Rules-Requires-Root: no
 Homepage: https://github.com/cloudbsdorg/cloudflare-register
 
@@ -19,17 +18,8 @@ Architecture: all
 Depends:
  ${python3:Depends},
  ${misc:Depends},
- python3-fastapi,
- python3-uvicorn,
- python3-pydantic,
- python3-pydantic-settings,
- python3-jinja2,
- python3-httpx,
- python3-bcrypt,
- python3-click,
- python3-itsdangerous,
- python3-multipart,
- python3-jose
+ adduser,
+ python3-psutil,
 Description: Smart Cloudflare DynDNS service
  cloudflare-register manages multiple hostnames across multiple Cloudflare
  zones with automatic IPv4/IPv6 detection, dual-stack record creation,

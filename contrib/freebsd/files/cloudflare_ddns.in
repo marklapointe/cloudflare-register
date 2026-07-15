@@ -11,8 +11,8 @@
 # Optional tunables (with defaults):
 #
 #   cloudflare_ddns_user="cloudflare_ddns"
-#   cloudflare_ddns_config="/usr/local/etc/cloudflare-register/config.json"
-#   cloudflare_ddns_command="/usr/local/bin/cloudflare-register"
+#   cloudflare_ddns_config="%%PREFIX%%/etc/cloudflare-register/config.json"
+#   cloudflare_ddns_command="%%PREFIX%%/bin/cloudflare-register"
 #
 # The config file is JSON; the service reads the path from the
 # CLOUDFLARE_REGISTER_CONFIG environment variable. Generate it with
@@ -27,8 +27,8 @@ load_rc_config "$name"
 
 : "${cloudflare_ddns_enable:="NO"}"
 : "${cloudflare_ddns_user:="cloudflare_ddns"}"
-: "${cloudflare_ddns_config:="/usr/local/etc/cloudflare-register/config.json"}"
-: "${cloudflare_ddns_command:="/usr/local/bin/cloudflare-register"}"
+: "${cloudflare_ddns_config:="%%PREFIX%%/etc/cloudflare-register/config.json"}"
+: "${cloudflare_ddns_command:="%%PREFIX%%/bin/cloudflare-register"}"
 
 pidfile="/var/run/${name}.pid"
 required_files="${cloudflare_ddns_config}"

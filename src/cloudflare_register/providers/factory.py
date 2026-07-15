@@ -64,8 +64,13 @@ def get(name: str) -> type[Provider]:
 
 
 def build(name: str, *, token: str) -> Provider:
-    """Construct a provider instance for ``name`` using ``token``."""
-    return get(name)(token=token)
+    """Construct a provider instance for ``name`` using ``token``.
+
+    By convention every registered provider accepts a ``token`` keyword;
+    the abstract base can't express that constructor signature.
+    """
+    cls = get(name)
+    return cls(token=token)  # type: ignore[call-arg]
 
 
 def known() -> list[str]:

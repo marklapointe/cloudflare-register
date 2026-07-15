@@ -26,61 +26,57 @@
 # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
-"""Per-request CSRF token (double-submit-cookie pattern).
+"""Session-bound CSRF tokens (signed synchronizer pattern).
 
-At login a random token is generated and stored in a non-``HttpOnly`` cookie.
-Every state-changing form must echo the same value in a hidden form field.
-Server compares cookie value to form value with a constant-time compare; a
-missing or mismatched pair is rejected.
+The token is ``HMAC-SHA256(secret_key, "csrf:" + access_token)`` — derived
+from the session JWT itself, so it needs no extra cookie and cannot be
+planted by a sibling subdomain or plain-HTTP MITM the way a naked
+double-submit cookie can. The server injects the token into every form it
+renders; :func:`require_match` recomputes it from the caller's session
+cookie and compares in constant time.
 
-``SameSite=Lax`` on the cookie provides defense in depth.
+A token is only as live as its session: re-login rotates the JWT and hence
+every form token. ``SameSite=Lax`` on the session cookie provides defense
+in depth.
 """
 
 from __future__ import annotations
 
-import secrets
+import hashlib
+import hmac
 
 from fastapi import HTTPException, Request, status
 
-COOKIE_NAME = "csrf_token"
 FORM_FIELD = "csrf_token"
 
-
-def issue_token() -> str:
-    """Return a fresh random CSRF token (raw value, never encoded)."""
-    return secrets.token_urlsafe(32)
+SESSION_COOKIE = "access_token"
 
 
-def set_cookie(response, token: str, *, secure: bool, max_age: int) -> None:
-    response.set_cookie(
-        COOKIE_NAME,
-        token,
-        httponly=False,
-        secure=secure,
-        samesite="lax",
-        max_age=max_age,
-        path="/",
-    )
-
-
-def delete_cookie(response) -> None:
-    response.delete_cookie(COOKIE_NAME, path="/")
+def token_for(secret_key: str, session_token: str) -> str:
+    """Derive the CSRF token bound to ``session_token`` (the session JWT)."""
+    mac = hmac.new(secret_key.encode("utf-8"), b"csrf:", hashlib.sha256)
+    mac.update(session_token.encode("utf-8"))
+    return mac.hexdigest()
 
 
 async def require_match(request: Request) -> None:
-    """FastAPI dependency: blocks POST/PUT/PATCH/DELETE without a matching token pair."""
+    """FastAPI dependency: blocks POST/PUT/PATCH/DELETE without a valid token."""
     if request.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
         return None
-    cookie_value = request.cookies.get(COOKIE_NAME)
-    if not cookie_value:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="missing CSRF cookie")
+    session_token = request.cookies.get(SESSION_COOKIE)
+    if not session_token:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="missing session")
     try:
         form = await request.form()
     except Exception:
         form = None
     form_value = form.get(FORM_FIELD) if form else None
-    if not form_value:
+    if not isinstance(form_value, str) or not form_value:
+        if form is not None:
+            await form.close()  # release spooled upload files before rejecting
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="missing CSRF form field")
-    if not secrets.compare_digest(cookie_value, form_value):
+    secret_key = request.app.state.settings.secret_key
+    expected = token_for(secret_key, session_token)
+    if not hmac.compare_digest(expected, form_value):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF token mismatch")
     return None

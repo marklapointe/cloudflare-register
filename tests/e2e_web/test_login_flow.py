@@ -13,7 +13,6 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import Page, expect
 
-
 pytestmark = pytest.mark.e2e
 
 
@@ -48,7 +47,9 @@ def test_login_with_valid_credentials_lands_dashboard(
     page.screenshot(path=str(screenshot_path / "03-dashboard.png"), full_page=True)
 
 
-def test_logout_clears_session(live_server: str, page: Page, screenshot_path, admin_credentials) -> None:
+def test_logout_clears_session(
+    live_server: str, page: Page, screenshot_path, admin_credentials
+) -> None:
     page.goto(live_server + "/login")
     page.fill("input[name=username]", admin_credentials["username"])
     page.fill("input[name=password]", admin_credentials["password"])

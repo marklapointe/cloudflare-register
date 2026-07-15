@@ -38,15 +38,13 @@ Precedence (highest to lowest):
 4. Field defaults declared on the model.
 
 We deliberately do NOT look for ``.env`` in the working directory. That
-location is ambiguous (which ``.env``?), leaks into tarballs and shells,
-and was rejected by the project maintainer. The Honcho application
-guidelines state: "JSON is the preferred config format for machine
-interfaces."
+location is ambiguous (which ``.env``?) and leaks into tarballs and shells.
 
-Secrets are required: the application refuses to start without
-``CLOUDFLARE_API_TOKEN`` and ``SECRET_KEY``. Default ``ADMIN_PASSWORD`` is
-``change-me`` so a fresh install is reachable but visibly insecure; the
-``check_config`` CLI command flags this.
+Secrets are required: :func:`require_safe_settings` raises ``ConfigError``
+when ``CLOUDFLARE_API_TOKEN``, ``SECRET_KEY``, or the admin password still
+hold their shipped placeholders, so the sync loop, web UI, and TUI refuse
+to start on an unconfigured install. ``CLOUDFLARE_REGISTER_ALLOW_INSECURE_DEFAULTS=1``
+downgrades that to a warning for throwaway local experiments.
 """
 
 from __future__ import annotations
@@ -67,7 +65,10 @@ _LOGGER = get_logger(__name__)
 _INSECURE_DEFAULT_PASSWORD: Final[str] = "change-me"
 _INSECURE_DEFAULT_SECRET: Final[str] = "change-me-to-a-random-48-byte-secret"
 
-_SYSTEM_CONF = Path("/etc/cloudflare-register.json")
+SYSTEM_CONFIG_PATH = Path("/etc/cloudflare-register.json")
+
+# Placeholder the ``init`` command writes for the API token.
+_PLACEHOLDER_TOKEN: Final[str] = "replace_me"
 
 
 def _xdg_path(env_var: str, default_subpath: str) -> Path:
@@ -107,8 +108,8 @@ def _resolve_settings_source() -> tuple[Path | None, dict[str, Any]]:
         override_path = Path(override)
         if override_path.exists() and os.access(override_path, os.R_OK):
             return override_path, _load_json_settings(override_path)
-    if _SYSTEM_CONF.exists() and os.access(_SYSTEM_CONF, os.R_OK):
-        return _SYSTEM_CONF, _load_json_settings(_SYSTEM_CONF)
+    if SYSTEM_CONFIG_PATH.exists() and os.access(SYSTEM_CONFIG_PATH, os.R_OK):
+        return SYSTEM_CONFIG_PATH, _load_json_settings(SYSTEM_CONFIG_PATH)
     user = _user_config_path()
     if user is not None:
         return user, _load_json_settings(user)
@@ -183,16 +184,18 @@ class Settings(BaseSettings):
         problems: list[str] = []
         if self.secret_key == _INSECURE_DEFAULT_SECRET:
             problems.append("SECRET_KEY")
-        if self.admin_password == _INSECURE_DEFAULT_PASSWORD:
+        if self.admin_password == _INSECURE_DEFAULT_PASSWORD and not self.admin_password_hash:
             problems.append("ADMIN_PASSWORD")
-        if self.cloudflare_api_token == _INSECURE_DEFAULT_SECRET:
+        token = self.cloudflare_api_token
+        if token == _INSECURE_DEFAULT_SECRET or token.startswith(_PLACEHOLDER_TOKEN):
             problems.append("CLOUDFLARE_API_TOKEN")
         return problems
 
     def ensure_paths(self) -> None:
         """Create configured directories with 0700 permissions."""
         for directory in (self.data_dir, self.config_dir, self.cache_dir):
-            directory.mkdir(parents=True, exist_ok=True)
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directory.chmod(0o700)
 
 
 def logging_level_names() -> set[str]:
@@ -214,7 +217,7 @@ def get_settings(*, refresh: bool = False) -> Settings:
     if refresh or _cached is None:
         try:
             _path, json_values = _resolve_settings_source()
-            _cached = Settings(**json_values)  # type: ignore[call-arg]
+            _cached = Settings(**json_values)
             if _path is not None:
                 _LOGGER.debug("loaded config from %s", _path)
         except Exception as exc:
@@ -229,14 +232,21 @@ def reset_settings_cache() -> None:
 
 
 def require_safe_settings(settings: Settings | None = None) -> Settings:
-    """Validate settings and raise ``ConfigError`` on insecure defaults when strict."""
+    """Validate settings; raise :class:`ConfigError` while insecure defaults are in use.
+
+    Set ``CLOUDFLARE_REGISTER_ALLOW_INSECURE_DEFAULTS=1`` to downgrade the
+    error to a warning (local experiments only — never production).
+    """
     s = settings or get_settings()
     s.ensure_paths()
     problems = s.unsafe_defaults_in_use()
-    if problems and os.environ.get("CLOUDFLARE_REGISTER_ALLOW_INSECURE_DEFAULTS") != "1":
-        _LOGGER.warning(
-            "insecure default values in use for: %s. Set the env vars or run "
-            "`cloudflare-register init` to generate a strong config.",
-            ", ".join(problems),
+    if problems:
+        message = (
+            "insecure default values in use for: "
+            f"{', '.join(problems)}. Set the env vars or run "
+            "`cloudflare-register init` to generate a strong config."
         )
+        if os.environ.get("CLOUDFLARE_REGISTER_ALLOW_INSECURE_DEFAULTS") != "1":
+            raise ConfigError(message)
+        _LOGGER.warning(message)
     return s

@@ -3,20 +3,19 @@ include LICENSE
 include AGENTS_START_HERE.md
 include requirements.txt
 include requirements-dev.txt
-include .env.example
 include pyproject.toml
 
 recursive-include src *.py
+include src/cloudflare_register/py.typed
 recursive-include src/cloudflare_register/web/templates *.html
+recursive-include src/cloudflare_register/web/static *.css
 recursive-include src/cloudflare_register/tui *.tcss
-recursive-include deploy *.service *.rc *.env.example
+recursive-include deploy *.service *.rc
 recursive-include contrib *.in
 
 prune .git
 prune .idea
 prune .junie
-prune __pycache__
-prune *.pyc
 prune .pytest_cache
 prune .ruff_cache
 prune .mypy_cache
@@ -24,3 +23,6 @@ prune .cache
 prune data
 prune venv
 prune .venv
+
+global-exclude *.py[cod]
+global-exclude __pycache__/*

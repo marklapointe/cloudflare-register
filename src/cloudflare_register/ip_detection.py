@@ -26,28 +26,33 @@
 # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
-"""Public IPv4 and IPv6 discovery with bounded LRU-style caching.
+"""Public IPv4 and IPv6 discovery with a small TTL cache.
 
-Algorithm choice (TAOCP §6.4 "Hashing and lookup" and §2.6 "Sorting"):
+Semantics matter here because the sync engine deletes DNS records for an
+address family it believes is *absent*:
 
-* Each lookup walks a small ``tuple`` of endpoints in priority order. Endpoints
-  are tried in parallel using ``asyncio.gather``; the first successful result
-  wins, others are cancelled.
-* A ``TTLCache`` (LRU by insertion order, capacity 256 entries) suppresses
-  repeat lookups within the cache window. Capacity is sized for the realistic
-  cardinality: one IPv4 entry + one IPv6 entry per host, plus the negative
-  cache entries (None) for absent address families.
-* Failure records the error, falls through to the next endpoint, and after all
-  endpoints fail returns ``None`` and emits ``IPDetectionError`` if the caller
-  wraps the call (the bare helper never raises to keep the periodic loop alive).
+* An endpoint response is accepted only if it parses as an IP address of
+  the requested family (dual-stack echo services otherwise return the
+  IPv4 address to v6 lookups, and captive portals return HTML).
+* ``None`` means the address family is **absent**: every probe failed *and*
+  the kernel has no route for that family (checked with a connectionless
+  UDP ``connect``, no packet sent).
+* :class:`IPDetectionError` is raised when probes failed although the
+  family appears routable — a transient outage. Callers must leave DNS
+  records untouched in that case rather than deleting them.
+
+An optional ``source_ip`` binds the probes to a specific local address so
+interface groups publish the IP of *their* uplink, not the default route's.
+Results are cached per ``(family, source)`` for a short TTL.
 """
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import socket
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable
 
 import httpx
 
@@ -56,20 +61,23 @@ from cloudflare_register.logging_setup import get_logger
 
 _LOGGER = get_logger(__name__)
 
+# Family-specific hostnames only: a dual-stack endpoint answers v6 lookups
+# with the v4 address when the host has no IPv6 connectivity.
 _IPV4_ENDPOINTS: tuple[str, ...] = (
     "https://api.ipify.org",
-    "https://ifconfig.io/ip",
     "https://ipv4.icanhazip.com",
+    "https://v4.ident.me",
 )
 _IPV6_ENDPOINTS: tuple[str, ...] = (
-    "https://api64.ipify.org",
-    "https://ifconfig.co/ip",
+    "https://api6.ipify.org",
     "https://ipv6.icanhazip.com",
+    "https://v6.ident.me",
 )
 
 _TIMEOUT_SECONDS = 6.0
 _CACHE_TTL_SECONDS = 30.0
-_CACHE_CAPACITY = 256
+_CACHE_CAPACITY = 32  # a handful of (family, source) pairs
+_ABSENT = "<absent>"
 
 
 class _TTLCache:
@@ -78,7 +86,7 @@ class _TTLCache:
     def __init__(self, capacity: int = _CACHE_CAPACITY, ttl: float = _CACHE_TTL_SECONDS) -> None:
         self._capacity = capacity
         self._ttl = ttl
-        self._data: OrderedDict[str, tuple[float, str | None]] = OrderedDict()
+        self._data: OrderedDict[str, tuple[float, str]] = OrderedDict()
 
     def get(self, key: str) -> str | None:
         hit = self._data.get(key)
@@ -91,7 +99,7 @@ class _TTLCache:
         self._data.move_to_end(key)
         return value
 
-    def put(self, key: str, value: str | None) -> None:
+    def put(self, key: str, value: str) -> None:
         self._data[key] = (time.monotonic(), value)
         self._data.move_to_end(key)
         while len(self._data) > self._capacity:
@@ -104,79 +112,116 @@ class _TTLCache:
 _cache = _TTLCache()
 
 
-def _build_client() -> httpx.AsyncClient:
-    """Construct the default async client used by ``_probe``.
+def _build_client(local_address: str | None = None) -> httpx.AsyncClient:
+    """Construct the async client used by ``_probe``.
 
     Indirected so tests can ``monkeypatch.setattr(ip_detection, "_build_client", ...)``.
     """
+    if local_address:
+        transport = httpx.AsyncHTTPTransport(local_address=local_address)
+        return httpx.AsyncClient(transport=transport)
     return httpx.AsyncClient()
 
 
-async def _probe(client: httpx.AsyncClient, url: str) -> str | None:
+def _family_routable(version: int) -> bool:
+    """Best-effort: does the kernel have a route for this address family?
+
+    A connectionless UDP ``connect`` asks the routing table without sending
+    a packet. Indirected for tests.
+    """
+    family = socket.AF_INET if version == 4 else socket.AF_INET6
+    target = ("8.8.8.8", 53) if version == 4 else ("2001:4860:4860::8888", 53)
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.connect(target)
+            return True
+    except OSError:
+        return False
+
+
+async def _probe(client: httpx.AsyncClient, url: str, version: int) -> str | None:
     try:
         response = await client.get(url, timeout=_TIMEOUT_SECONDS)
         response.raise_for_status()
         candidate = response.text.strip()
-        return candidate or None
     except (TimeoutError, httpx.HTTPError) as exc:
         _LOGGER.debug("IP probe %s failed: %s", url, exc.__class__.__name__)
         return None
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        _LOGGER.debug("IP probe %s returned a non-address: %.80r", url, candidate)
+        return None
+    if address.version != version:
+        _LOGGER.debug("IP probe %s returned IPv%d, wanted IPv%d", url, address.version, version)
+        return None
+    return str(address)  # normalized (e.g. compressed IPv6) for stable comparisons
 
 
-async def _first_hit(endpoints: tuple[str, ...]) -> str | None:
-    cached = _cache.get(endpoints[0] if len(endpoints) == 1 else f"multi:{endpoints[0]}")
-    if cached is not None or (
-        cached is None and _cache.get(endpoints[0]) is not None and len(endpoints) == 1
-    ):
+async def _first_hit(
+    endpoints: tuple[str, ...], version: int, source_ip: str | None = None
+) -> str | None:
+    """Probe all endpoints concurrently; first valid answer wins.
+
+    Losing probes are cancelled and awaited before the client closes.
+    """
+    async with _build_client(source_ip) as client:
+        tasks = [asyncio.create_task(_probe(client, url, version)) for url in endpoints]
+        try:
+            for future in asyncio.as_completed(tasks):
+                result = await future
+                if result:
+                    return result
+            return None
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _get_public_ip(
+    version: int, endpoints: tuple[str, ...], source_ip: str | None
+) -> str | None:
+    key = f"ipv{version}:{source_ip or 'default'}"
+    cached = _cache.get(key)
+    if cached == _ABSENT:
+        return None
+    if cached is not None:
         return cached
-
-    async with _build_client() as client:
-        coros: list[Awaitable[str | None]] = [_probe(client, url) for url in endpoints]
-        for coro in asyncio.as_completed(coros):
-            result = await coro
-            if result:
-                _cache.put(endpoints[0], result)
-                return result
-    _cache.put(endpoints[0], None)
+    result = await _first_hit(endpoints, version, source_ip)
+    if result:
+        _cache.put(key, result)
+        return result
+    # All probes failed. Only report "family absent" when the kernel agrees
+    # there is no route; otherwise this is a transient failure and deleting
+    # DNS records over it would be data loss.
+    if source_ip is not None or _family_routable(version):
+        raise IPDetectionError(
+            f"all IPv{version} probe endpoints failed although IPv{version} appears routable"
+        )
+    _cache.put(key, _ABSENT)
     return None
 
 
-async def get_public_ipv4() -> str | None:
-    cached = _cache.get("ipv4")
-    if cached:
-        return cached
-    if cached is None and "ipv4" in _cache._data:  # negative-cache hit
-        return None
-    result = await _first_hit(_IPV4_ENDPOINTS)
-    if result:
-        _cache.put("ipv4", result)
-    else:
-        _cache.put("ipv4", None)
-    return result
+async def get_public_ipv4(source_ip: str | None = None) -> str | None:
+    """Public IPv4, ``None`` if the family is absent. Raises on transient failure."""
+    return await _get_public_ip(4, _IPV4_ENDPOINTS, source_ip)
 
 
-async def get_public_ipv6() -> str | None:
-    cached = _cache.get("ipv6")
-    if cached:
-        return cached
-    if cached is None and "ipv6" in _cache._data:
-        return None
-    result = await _first_hit(_IPV6_ENDPOINTS)
-    if result:
-        _cache.put("ipv6", result)
-    else:
-        _cache.put("ipv6", None)
-    return result
+async def get_public_ipv6(source_ip: str | None = None) -> str | None:
+    """Public IPv6, ``None`` if the family is absent. Raises on transient failure."""
+    return await _get_public_ip(6, _IPV6_ENDPOINTS, source_ip)
 
 
-async def get_public_ips() -> tuple[str | None, str | None]:
-    """Return ``(ipv4, ipv6)``. Either may be ``None`` if unavailable."""
-    try:
-        ipv4, ipv6 = await asyncio.gather(get_public_ipv4(), get_public_ipv6())
-    except IPDetectionError:
-        raise
-    except Exception as exc:
-        raise IPDetectionError(str(exc)) from exc
+async def get_public_ips(
+    source_ipv4: str | None = None, source_ipv6: str | None = None
+) -> tuple[str | None, str | None]:
+    """Return ``(ipv4, ipv6)``; either may be ``None`` when that family is absent.
+
+    Raises :class:`IPDetectionError` if either family's detection fails
+    transiently — callers must not treat that as "no address".
+    """
+    ipv4, ipv6 = await asyncio.gather(get_public_ipv4(source_ipv4), get_public_ipv6(source_ipv6))
     return ipv4, ipv6
 
 

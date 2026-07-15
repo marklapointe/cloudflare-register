@@ -12,7 +12,6 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import Page, expect
 
-
 pytestmark = pytest.mark.e2e
 
 
@@ -24,7 +23,9 @@ def _login(page: Page, live_server: str, username: str, password: str) -> None:
     page.wait_for_url(live_server + "/")
 
 
-def test_wizard_renders_form(live_server: str, page: Page, screenshot_path, admin_credentials) -> None:
+def test_wizard_renders_form(
+    live_server: str, page: Page, screenshot_path, admin_credentials
+) -> None:
     _login(page, live_server, admin_credentials["username"], admin_credentials["password"])
     page.goto(live_server + "/wizard")
     expect(page.locator("button:has-text('Load zones')")).to_be_visible()

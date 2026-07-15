@@ -19,7 +19,7 @@ class HostConfig(BaseModel):
     upgrades between storage versions only need to change this file.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     hostname: str = Field(min_length=1, max_length=253)
     zone_id: str = Field(min_length=32, max_length=32)

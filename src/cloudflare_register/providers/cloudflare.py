@@ -56,6 +56,8 @@ _BASE_URL = "https://api.cloudflare.com/client/v4"
 _TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = 1.5
+_MAX_RETRY_AFTER = 30.0  # cap server-suggested delays so one bad header can't stall the loop
+_ZONES_PER_PAGE = 50
 
 
 class CloudflareProvider(Provider):
@@ -77,28 +79,53 @@ class CloudflareProvider(Provider):
         if self._owns_client:
             await self._client.aclose()
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+    @staticmethod
+    def _retry_delay(response: httpx.Response, attempt: int) -> float:
+        raw: str = response.headers.get("Retry-After", "")
+        retry_after: float
+        try:
+            retry_after = float(raw)
+        except ValueError:
+            retry_after = 0.0  # HTTP-date form or garbage: use exponential backoff
+        if retry_after > 0:
+            return min(retry_after, _MAX_RETRY_AFTER)
+        return _RETRY_BACKOFF * (2.0**attempt)
+
+    async def _request(self, method: str, path: str, *, full: bool = False, **kwargs: Any) -> Any:
+        """Issue one API request with bounded retries.
+
+        Raises the *typed* error from the final attempt
+        (:class:`ProviderRateLimitError` for 429, :class:`ProviderError`
+        for 5xx/transport failures) so callers can back off appropriately.
+        """
         url = f"{_BASE_URL}{path}"
-        last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES):
+            last_attempt = attempt == _MAX_RETRIES - 1
             try:
                 response = await self._client.request(method, url, **kwargs)
             except httpx.HTTPError as exc:
-                last_error = exc
+                # Only retry a non-idempotent method when the request never
+                # reached the server; retrying a timed-out POST can create
+                # duplicate records.
+                idempotent = method.upper() in {"GET", "PUT", "DELETE"}
+                retriable = idempotent or isinstance(exc, httpx.ConnectError)
+                if not retriable or last_attempt:
+                    raise ProviderError(f"transport failure for {url}: {exc}") from exc
                 await asyncio.sleep(_RETRY_BACKOFF * (2**attempt))
                 continue
-            if response.status_code in (429, 500, 502, 503, 504):
-                last_error = ProviderRateLimitError(f"{response.status_code} from {url}")
-                retry_after = float(response.headers.get("Retry-After", "0") or 0)
-                delay = retry_after or (_RETRY_BACKOFF * (2**attempt))
-                await asyncio.sleep(delay)
+            if response.status_code == 429 or response.status_code in (500, 502, 503, 504):
+                if response.status_code == 429:
+                    error: ProviderError = ProviderRateLimitError(f"429 rate limited from {url}")
+                else:
+                    error = ProviderError(f"{response.status_code} server error from {url}")
+                if last_attempt:
+                    raise error
+                await asyncio.sleep(self._retry_delay(response, attempt))
                 continue
-            return self._decode(response)
-        if last_error is not None:
-            raise ProviderError(f"request failed after {_MAX_RETRIES} attempts: {last_error}")
-        raise ProviderError("request failed without exception")
+            return self._decode(response, full=full)
+        raise ProviderError("request failed without exception")  # pragma: no cover
 
-    def _decode(self, response: httpx.Response) -> Any:
+    def _decode(self, response: httpx.Response, *, full: bool = False) -> Any:
         if response.status_code in (401, 403):
             raise ProviderAuthError(f"{response.status_code} {response.text[:200]}")
         if response.status_code == 404:
@@ -113,21 +140,42 @@ class CloudflareProvider(Provider):
             errors = payload.get("errors") or []
             message = "; ".join(str(e.get("message", e)) for e in errors) or "unspecified failure"
             raise ProviderError(message)
-        return payload.get("result")
+        return payload if full else payload.get("result")
 
     async def list_zones(self) -> list[dict[str, str]]:
-        result = await self._request("GET", "/zones?per_page=50")
-        return [{"id": z["id"], "name": z["name"]} for z in result]
+        zones: list[dict[str, str]] = []
+        page = 1
+        while True:
+            payload = await self._request(
+                "GET",
+                "/zones",
+                full=True,
+                params={"per_page": _ZONES_PER_PAGE, "page": page},
+            )
+            zones.extend({"id": z["id"], "name": z["name"]} for z in payload.get("result") or [])
+            info = payload.get("result_info") or {}
+            total_pages = int(info.get("total_pages") or 1)
+            if page >= total_pages:
+                return zones
+            page += 1
 
     async def list_records(self, zone_id: str, name: str) -> list[DnsRecord]:
         result = await self._request(
             "GET",
-            f"/zones/{zone_id}/dns_records?name={name}&per_page=100",
+            f"/zones/{zone_id}/dns_records",
+            params={"name": name, "per_page": 100},
         )
         return [DnsRecord.from_cloudflare(r) for r in result]
 
     async def create_record(
-        self, zone_id: str, record_type: str, name: str, content: str, proxied: bool = False
+        self,
+        zone_id: str,
+        record_type: str,
+        name: str,
+        content: str,
+        proxied: bool = False,
+        *,
+        ttl: int = 1,
     ) -> DnsRecord:
         result = await self._request(
             "POST",
@@ -137,7 +185,7 @@ class CloudflareProvider(Provider):
                 "name": name,
                 "content": content,
                 "proxied": proxied,
-                "ttl": 1,
+                "ttl": ttl,
             },
         )
         return DnsRecord.from_cloudflare(result)
@@ -150,6 +198,8 @@ class CloudflareProvider(Provider):
         name: str,
         content: str,
         proxied: bool = False,
+        *,
+        ttl: int = 1,
     ) -> DnsRecord:
         result = await self._request(
             "PUT",
@@ -159,7 +209,7 @@ class CloudflareProvider(Provider):
                 "name": name,
                 "content": content,
                 "proxied": proxied,
-                "ttl": 1,
+                "ttl": ttl,
             },
         )
         return DnsRecord.from_cloudflare(result)

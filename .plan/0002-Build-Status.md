@@ -13,13 +13,18 @@
 
 ## CI/CD Pipeline
 
+Hosted CI: GitHub Actions (`.github/workflows/ci.yml`) — ruff, mypy, and
+pytest (with the 80 % coverage gate) on Linux across Python 3.11–3.13.
+Package builds are local-only make targets and are NOT exercised by CI;
+statuses below reflect the last manual run on this workstation.
+
 | Stage | Backend | Command | Status |
 |-------|---------|---------|--------|
-| Lint | ruff + mypy | `make lint` | green |
-| Test | pytest + coverage | `make test-cov` | green |
-| Build sdist/wheel | pep517 | `make package-generic` | green |
-| Build .deb | dpkg-buildpackage | `make package-debian` | green |
-| Build .txz | contrib/freebsd port | `make package-freebsd` | green |
+| Lint | ruff + mypy | `make lint` | green (local, 2026-07-14) |
+| Test | pytest + coverage | `make test-cov` | green (local, 2026-07-14) |
+| Build sdist/wheel | pep517 | `make package-generic` | green (local) |
+| Build .deb | dpkg-buildpackage | `make package-debian` | untested since packaging rewrite |
+| Build .txz | contrib/freebsd port | `make package-freebsd` | untested since packaging rewrite |
 
 ## Artifacts
 
@@ -31,7 +36,8 @@
 
 ## Last Updated
 
-2026-07-14 — pipeline green from a single source tree on all three OSes.
+2026-07-14 — security + correctness overhaul; debian/ and contrib/freebsd/
+rewritten and pending a real package build on their target OSes.
 
 Last Updated: 2026-07-14
 Contact: Mark LaPointe <mark@cloudbsd.org>

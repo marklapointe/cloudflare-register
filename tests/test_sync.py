@@ -30,13 +30,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 from cloudflare_register.persistence import HostConfig
 from cloudflare_register.providers.base import DnsRecord, Provider
-from cloudflare_register.sync import reconcile_host, run_sync_once
+from cloudflare_register.sync import UNKNOWN_ADDRESS, reconcile_host
 
 
 class _StaticProvider(Provider):
@@ -54,13 +52,29 @@ class _StaticProvider(Provider):
     async def list_records(self, zone_id: str, name: str) -> list[DnsRecord]:
         return list(self.existing)
 
-    async def create_record(self, zone_id, record_type, name, content, proxied=False):
+    async def create_record(self, zone_id, record_type, name, content, proxied=False, *, ttl=1):
         self.created.append((zone_id, record_type, name, content, proxied))
-        return DnsRecord(record_id=f"new-{len(self.created)}", record_type=record_type, name=name, content=content, proxied=proxied)
+        return DnsRecord(
+            record_id=f"new-{len(self.created)}",
+            record_type=record_type,
+            name=name,
+            content=content,
+            proxied=proxied,
+            ttl=ttl,
+        )
 
-    async def update_record(self, zone_id, record_id, record_type, name, content, proxied=False):
+    async def update_record(
+        self, zone_id, record_id, record_type, name, content, proxied=False, *, ttl=1
+    ):
         self.updated.append((zone_id, record_id, record_type, name, content, proxied))
-        return DnsRecord(record_id=record_id, record_type=record_type, name=name, content=content, proxied=proxied)
+        return DnsRecord(
+            record_id=record_id,
+            record_type=record_type,
+            name=name,
+            content=content,
+            proxied=proxied,
+            ttl=ttl,
+        )
 
     async def delete_record(self, zone_id, record_id):
         self.deleted.append((zone_id, record_id))
@@ -71,7 +85,9 @@ class _StaticProvider(Provider):
 
 async def test_reconcile_creates_when_no_records(provider_with_no_records):
     provider = provider_with_no_records
-    host = HostConfig(hostname="box.example.com", zone_id="0" * 32, zone_name="example.com", proxied=False)
+    host = HostConfig(
+        hostname="box.example.com", zone_id="0" * 32, zone_name="example.com", proxied=False
+    )
     actions = await reconcile_host(provider, host, "1.2.3.4", "2001:db8::1")
     assert any("created A" in a for a in actions)
     assert any("created AAAA" in a for a in actions)
@@ -120,3 +136,58 @@ def host_with_records():
     )
     host = HostConfig(hostname="box.example.com", zone_id="0" * 32, zone_name="example.com")
     return host, provider
+
+
+async def test_reconcile_unknown_family_leaves_records(host_with_records):
+    """UNKNOWN_ADDRESS (detection failed) must not touch any records."""
+    host, provider = host_with_records
+    actions = await reconcile_host(provider, host, UNKNOWN_ADDRESS, UNKNOWN_ADDRESS)
+    assert actions == []
+    assert not provider.created and not provider.updated and not provider.deleted
+
+
+async def test_reconcile_deletes_duplicate_records():
+    provider = _StaticProvider(
+        existing=[
+            DnsRecord(record_id="a1", record_type="A", name="box.example.com", content="1.2.3.4"),
+            DnsRecord(record_id="a2", record_type="A", name="box.example.com", content="5.6.7.8"),
+        ]
+    )
+    host = HostConfig(hostname="box.example.com", zone_id="0" * 32, zone_name="example.com")
+    actions = await reconcile_host(provider, host, "1.2.3.4", None)
+    assert ("0" * 32, "a2") in provider.deleted
+    assert not provider.updated  # the kept record already has the right content
+    assert any("duplicate" in a for a in actions)
+
+
+async def test_reconcile_semantically_equal_ipv6_is_noop():
+    provider = _StaticProvider(
+        existing=[
+            DnsRecord(
+                record_id="aaaa1",
+                record_type="AAAA",
+                name="box.example.com",
+                content="2001:db8:0:0:0:0:0:1",
+            ),
+        ]
+    )
+    host = HostConfig(hostname="box.example.com", zone_id="0" * 32, zone_name="example.com")
+    actions = await reconcile_host(provider, host, None, "2001:db8::1")
+    assert not provider.updated
+    assert actions == []
+
+
+async def test_reconcile_honors_configured_ttl():
+    provider = _StaticProvider(
+        existing=[
+            DnsRecord(
+                record_id="a1", record_type="A", name="box.example.com", content="1.2.3.4", ttl=1
+            ),
+        ]
+    )
+    host = HostConfig(
+        hostname="box.example.com", zone_id="0" * 32, zone_name="example.com", ttl=300
+    )
+    actions = await reconcile_host(provider, host, "1.2.3.4", None)
+    assert len(provider.updated) == 1  # same address, but TTL drifted
+    assert any("updated A" in a for a in actions)

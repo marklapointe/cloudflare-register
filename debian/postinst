@@ -3,20 +3,30 @@ set -e
 
 case "$1" in
     configure)
+        # Service account. Created once; intentionally never removed on
+        # remove/purge (files may remain owned by it, and UID reuse is a
+        # security risk).
         if ! getent passwd cloudflare-ddns >/dev/null; then
-            adduser --system --no-create-home --shell /usr/sbin/nologin \
-                --group --gecos 'cloudflare-register service account' \
+            adduser --system --group --no-create-home \
+                --home /var/lib/cloudflare-register \
+                --shell /usr/sbin/nologin \
+                --gecos 'cloudflare-register service account' \
                 cloudflare-ddns
         fi
-        chown -R cloudflare-ddns:cloudflare-ddns /var/lib/cloudflare-register
-        chmod 0750 /var/lib/cloudflare-register
-        if [ ! -f /etc/cloudflare-register/cloudflare-register.env ]; then
-            cp -a /etc/cloudflare-register/cloudflare-register.env.example \
-                  /etc/cloudflare-register/cloudflare-register.env
-            chown cloudflare-ddns:cloudflare-ddns /etc/cloudflare-register/cloudflare-register.env
-            chmod 0640 /etc/cloudflare-register/cloudflare-register.env
-            echo "Wrote /etc/cloudflare-register/cloudflare-register.env"
-            echo "Edit it and run: systemctl enable --now cloudflare-ddns"
+
+        for dir in /var/lib/cloudflare-register /var/log/cloudflare-register; do
+            if [ ! -d "$dir" ]; then
+                mkdir -p "$dir"
+            fi
+            chown cloudflare-ddns:cloudflare-ddns "$dir"
+            chmod 0750 "$dir"
+        done
+
+        # Do not generate config (or secrets) here; the CLI does that.
+        if [ ! -f /etc/cloudflare-register.json ]; then
+            echo "No /etc/cloudflare-register.json found."
+            echo "Run 'cloudflare-register init --system' to create it, then:"
+            echo "    systemctl restart cloudflare-ddns"
         fi
     ;;
 esac

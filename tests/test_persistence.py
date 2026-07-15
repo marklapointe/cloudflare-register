@@ -34,6 +34,7 @@ import json
 
 import pytest
 
+from cloudflare_register.exceptions import PersistenceError
 from cloudflare_register.persistence import HostConfig, load_hosts_config, save_hosts_config
 
 
@@ -49,6 +50,7 @@ def test_round_trip(empty_store, sample_host_config):
 def test_load_empty_when_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     from cloudflare_register import config
+
     config.reset_settings_cache()
     assert load_hosts_config() == []
 
@@ -65,24 +67,26 @@ def test_save_creates_file_with_0600(empty_store, sample_host_config, valid_sett
 def test_invalid_persisted_file_raises(tmp_path, monkeypatch, valid_settings):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     from cloudflare_register import config
+
     config.reset_settings_cache()
     settings = config.get_settings()
     settings.ensure_paths()
     bad = settings.data_dir / "hosts.json"
     bad.write_text("not-a-json-list", encoding="utf-8")
-    with pytest.raises(Exception):
+    with pytest.raises(PersistenceError):
         load_hosts_config()
 
 
 def test_invalid_host_in_store_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     from cloudflare_register import config
+
     config.reset_settings_cache()
     settings = config.get_settings()
     settings.ensure_paths()
     bad_entry = settings.data_dir / "hosts.json"
     bad_entry.write_text(json.dumps([{"hostname": "x", "zone_id": "short"}]), encoding="utf-8")
-    with pytest.raises(Exception):
+    with pytest.raises(PersistenceError):
         load_hosts_config()
 
 
@@ -90,5 +94,6 @@ def test_invalid_host_in_store_rejected(tmp_path, monkeypatch):
 def empty_store(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "store"))
     from cloudflare_register import config
+
     config.reset_settings_cache()
     return config.get_settings()

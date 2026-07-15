@@ -36,7 +36,6 @@ import pytest
 
 from cloudflare_register.exceptions import (
     ProviderAuthError,
-    ProviderError,
     ProviderNotFoundError,
 )
 from cloudflare_register.providers.base import DnsRecord
@@ -44,7 +43,9 @@ from cloudflare_register.providers.cloudflare import CloudflareProvider
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, body: dict[str, Any] | None = None, text: str = "") -> None:
+    def __init__(
+        self, status_code: int, body: dict[str, Any] | None = None, text: str = ""
+    ) -> None:
         self.status_code = status_code
         self._body = body or {}
         self.text = text
@@ -91,7 +92,14 @@ async def test_list_zones_parses_response() -> None:
 async def test_create_record_returns_record() -> None:
     body = {
         "success": True,
-        "result": {"id": "rec1", "type": "A", "name": "box.example.com", "content": "1.1.1.1", "ttl": 1, "proxied": False},
+        "result": {
+            "id": "rec1",
+            "type": "A",
+            "name": "box.example.com",
+            "content": "1.1.1.1",
+            "ttl": 1,
+            "proxied": False,
+        },
     }
     fake = _FakeAsyncClient([_FakeResponse(200, body)])
     provider = CloudflareProvider("good-token", client=fake)  # type: ignore[arg-type]
@@ -114,7 +122,9 @@ async def test_auth_error_raises_typed_exception() -> None:
 
 
 async def test_404_raises_not_found() -> None:
-    fake = _FakeAsyncClient([_FakeResponse(404, {"success": False, "errors": [{"message": "missing"}]}, "not found")])
+    fake = _FakeAsyncClient(
+        [_FakeResponse(404, {"success": False, "errors": [{"message": "missing"}]}, "not found")]
+    )
     provider = CloudflareProvider("good-token", client=fake)  # type: ignore[arg-type]
     with pytest.raises(ProviderNotFoundError):
         await provider.list_zones()
@@ -127,7 +137,9 @@ async def test_missing_token_rejected() -> None:
 
 
 async def test_delete_missing_record_is_silent() -> None:
-    fake = _FakeAsyncClient([_FakeResponse(404, {"success": False, "errors": [{"message": "gone"}]}, "missing")])
+    fake = _FakeAsyncClient(
+        [_FakeResponse(404, {"success": False, "errors": [{"message": "gone"}]}, "missing")]
+    )
     provider = CloudflareProvider("good-token", client=fake)  # type: ignore[arg-type]
     try:
         await provider.delete_record("z", "rec")  # must not raise

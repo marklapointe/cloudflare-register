@@ -14,7 +14,6 @@ eggs/
 parts/
 sdist/
 wheels/
-pip-wheel-metadata/
 
 # Virtual environments
 venv/
@@ -31,9 +30,6 @@ coverage.xml
 htmlcov/
 .cache
 junit.xml
-.tap
-.xml
-.subunit
 
 # Ruff / mypy / other tools
 .ruff_cache/
@@ -53,15 +49,14 @@ dmypy.json
 # JetBrains AI config
 .junie/
 
-# Application runtime
-data/
+# Application runtime (anchored: must not swallow src/ or tests/ subdirs)
+/data/
 .env
 .env.*
-!.env.example
 
 # Logs
 *.log
 logs/
 
-# Generated TUI/web assets if added later
-static/
+# Playwright E2E output
+/docs/screenshots/

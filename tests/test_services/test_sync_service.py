@@ -4,14 +4,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 from cloudflare_register.domain import HostConfig
 from cloudflare_register.providers.base import DnsRecord, Provider
 from cloudflare_register.services import HostService, InterfaceService, SyncService
-
 
 ZONE = "abcdef0123456789abcdef0123456789"
 
@@ -31,13 +28,29 @@ class _CapturingProvider(Provider):
     async def list_records(self, zone_id: str, name: str) -> list[DnsRecord]:
         return list(self.existing)
 
-    async def create_record(self, zone_id, record_type, name, content, proxied=False):
+    async def create_record(self, zone_id, record_type, name, content, proxied=False, *, ttl=1):
         self.created.append((zone_id, record_type, name, content, proxied))
-        return DnsRecord(record_id=f"new-{len(self.created)}", record_type=record_type, name=name, content=content, proxied=proxied)
+        return DnsRecord(
+            record_id=f"new-{len(self.created)}",
+            record_type=record_type,
+            name=name,
+            content=content,
+            proxied=proxied,
+            ttl=ttl,
+        )
 
-    async def update_record(self, zone_id, record_id, record_type, name, content, proxied=False):
+    async def update_record(
+        self, zone_id, record_id, record_type, name, content, proxied=False, *, ttl=1
+    ):
         self.updated.append((zone_id, record_id, record_type, name, content, proxied))
-        return DnsRecord(record_id=record_id, record_type=record_type, name=name, content=content, proxied=proxied)
+        return DnsRecord(
+            record_id=record_id,
+            record_type=record_type,
+            name=name,
+            content=content,
+            proxied=proxied,
+            ttl=ttl,
+        )
 
     async def delete_record(self, zone_id, record_id):
         self.deleted.append((zone_id, record_id))
@@ -48,10 +61,10 @@ class _CapturingProvider(Provider):
 
 @pytest.fixture
 def fixed_public_ips(monkeypatch):
-    async def _v4() -> str:
+    async def _v4(source_ip=None) -> str:
         return "203.0.113.10"
 
-    async def _v6() -> str | None:
+    async def _v6(source_ip=None) -> str | None:
         return "2001:db8::10"
 
     monkeypatch.setattr("cloudflare_register.services.sync_service.get_public_ipv4", _v4)
@@ -113,7 +126,9 @@ async def test_run_once_with_no_hosts_returns_empty_report(service_storage):
     assert report.created == 0
 
 
-async def test_run_once_with_provider_errors_captures_per_host(service_storage, fixed_public_ips, monkeypatch):
+async def test_run_once_with_provider_errors_captures_per_host(
+    service_storage, fixed_public_ips, monkeypatch
+):
     host_svc = HostService()
     _seed_group(host_svc, ["broken.example.com"], "home-wan")
 
@@ -137,5 +152,54 @@ def service_storage(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     from cloudflare_register.config import reset_settings_cache
+
     reset_settings_cache()
     yield
+
+
+async def test_run_once_detection_failure_deletes_nothing(service_storage, monkeypatch):
+    """A transient IP-detection outage must never delete records."""
+    from cloudflare_register.exceptions import IPDetectionError
+
+    async def _fail(source_ip=None):
+        raise IPDetectionError("all probes failed")
+
+    monkeypatch.setattr("cloudflare_register.services.sync_service.get_public_ipv4", _fail)
+    monkeypatch.setattr("cloudflare_register.services.sync_service.get_public_ipv6", _fail)
+
+    host_svc = HostService()
+    _seed_group(host_svc, ["a.example.com"], "home-wan")
+    provider = _CapturingProvider()
+    sync = SyncService(
+        host_service=host_svc,
+        interface_service=InterfaceService(),
+        provider=provider,
+    )
+    report = await sync.run_once()
+    assert provider.deleted == []
+    assert provider.created == []
+    assert report.hosts_processed == 0
+    assert report.errors
+
+
+async def test_run_once_no_families_at_all_deletes_nothing(service_storage, monkeypatch):
+    """Both families 'absent' means the box is offline — do not wipe DNS."""
+
+    async def _none(source_ip=None):
+        return None
+
+    monkeypatch.setattr("cloudflare_register.services.sync_service.get_public_ipv4", _none)
+    monkeypatch.setattr("cloudflare_register.services.sync_service.get_public_ipv6", _none)
+
+    host_svc = HostService()
+    _seed_group(host_svc, ["a.example.com"], "home-wan")
+    provider = _CapturingProvider()
+    sync = SyncService(
+        host_service=host_svc,
+        interface_service=InterfaceService(),
+        provider=provider,
+    )
+    report = await sync.run_once()
+    assert provider.deleted == []
+    assert report.hosts_processed == 0
+    assert report.errors

@@ -55,7 +55,7 @@ def test_log_level_normalized(monkeypatch):
 def test_log_level_invalid_raises(monkeypatch):
     monkeypatch.setenv("LOG_LEVEL", "FOOBAR")
     config_module.reset_settings_cache()
-    with pytest.raises(Exception):
+    with pytest.raises(ConfigError):
         config_module.get_settings()
 
 
@@ -66,6 +66,29 @@ def test_settings_detects_insecure_defaults(monkeypatch):
     settings = config_module.get_settings()
     problems = settings.unsafe_defaults_in_use()
     assert "SECRET_KEY" in problems
+
+
+def test_require_safe_settings_raises_on_insecure_defaults(monkeypatch):
+    monkeypatch.setenv("SECRET_KEY", "change-me-to-a-random-48-byte-secret")
+    monkeypatch.delenv("CLOUDFLARE_REGISTER_ALLOW_INSECURE_DEFAULTS", raising=False)
+    config_module.reset_settings_cache()
+    with pytest.raises(ConfigError, match="SECRET_KEY"):
+        config_module.require_safe_settings()
+
+
+def test_require_safe_settings_allows_optout(monkeypatch):
+    monkeypatch.setenv("SECRET_KEY", "change-me-to-a-random-48-byte-secret")
+    monkeypatch.setenv("CLOUDFLARE_REGISTER_ALLOW_INSECURE_DEFAULTS", "1")
+    config_module.reset_settings_cache()
+    settings = config_module.require_safe_settings()
+    assert "SECRET_KEY" in settings.unsafe_defaults_in_use()
+
+
+def test_placeholder_api_token_flagged(monkeypatch):
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "replace_me")
+    config_module.reset_settings_cache()
+    settings = config_module.get_settings()
+    assert "CLOUDFLARE_API_TOKEN" in settings.unsafe_defaults_in_use()
 
 
 def test_settings_cache_is_cleared(monkeypatch):

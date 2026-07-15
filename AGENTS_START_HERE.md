@@ -54,9 +54,9 @@ persistence.py   ← atomic JSON storage with flock
 
 ## Four Primary Directives
 
-1. **Security First** — secrets in `.env` (0600), CSRF on every POST,
-   bcrypt password hashing, no `subprocess`, no shell expansion of user
-   input. See `.plan/0100-Security-Overview.md`.
+1. **Security First** — secrets in the JSON config (0600), session-bound
+   CSRF on every POST, bcrypt password hashing, login throttling, no shell
+   expansion of user input. See `.plan/0100-Security-Overview.md`.
 2. **Layered Architecture** — `domain/` (pure) → `services/` (orchestration)
    → adapters. Controllers MUST NOT touch `persistence.py` directly;
    they call `HostService` / `InterfaceService`. See
@@ -105,7 +105,7 @@ persistence.py   ← atomic JSON storage with flock
 | Run TUI | `make tui` |
 | Run sync once | `make sync` |
 | Validate config | `make check-config` |
-| Generate .env | `make init` |
+| Generate JSON config | `make init` |
 | List interfaces | `make interfaces` |
 | List hosts | `make hosts` |
 | Run unit tests | `make test` |
@@ -122,7 +122,7 @@ persistence.py   ← atomic JSON storage with flock
 
 | Need | Path |
 |------|------|
-| Default config (env) | `.env` in CWD |
+| Default config (JSON) | `$CLOUDFLARE_REGISTER_CONFIG` → `/etc/cloudflare-register.json` → `~/.config/cloudflare_register/config.json` |
 | Default data dir | `$XDG_DATA_HOME/cloudflare_register/` |
 | Hosts JSON | `$XDG_DATA_HOME/cloudflare_register/hosts.json` (0600) |
 | Interface groups JSON | `$XDG_DATA_HOME/cloudflare_register/interface_groups.json` (0600) |

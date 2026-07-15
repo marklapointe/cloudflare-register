@@ -59,6 +59,7 @@ def test_resolve_interface_passes_through(monkeypatch):
 
 def test_find_interface_for_address_handles_none():
     from cloudflare_register.services.interface_service import _find_interface_for_address
+
     assert _find_interface_for_address({}, None) is None
     assert _find_interface_for_address({}, "192.0.2.1") is None
 

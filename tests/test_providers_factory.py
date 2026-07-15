@@ -60,11 +60,7 @@ def test_register_then_build():
         name = "test-provider"
 
     register("test-provider", _Fake)
-    try:
-        assert get("test-provider") is _Fake
-    finally:
-        _REGISTRY = known()
-        del _REGISTRY
+    assert get("test-provider") is _Fake
 
 
 def test_register_rejects_non_subclass():

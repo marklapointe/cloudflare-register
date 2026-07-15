@@ -12,7 +12,6 @@ PACKAGE       := cloudflare_register
 PROJECT_NAME  := cloudflare-register
 VERSION       := $(shell grep '^version' pyproject.toml | head -1 | cut -d'"' -f2 2>/dev/null || echo 0.2.0)
 
-PYTHON        ?= python3
 VENV          ?= .venv
 PIP           := $(VENV)/bin/pip
 PYTEST        := $(VENV)/bin/pytest
@@ -64,6 +63,10 @@ else
   INSTALL_BACKEND := generic
 endif
 
+# Fallback interpreter (set AFTER the per-OS blocks so FreeBSD's
+# `PYTHON ?= python3.11` above actually takes effect).
+PYTHON        ?= python3
+
 # Default goal
 .DEFAULT_GOAL := help
 
@@ -80,11 +83,16 @@ venv: ## Create a Python venv at $(VENV).
 	@test -d "$(VENV)" || $(PYTHON) -m venv "$(VENV)"
 	@touch "$(VENV_BIN)/activate"
 
-.PHONY: install
-install: venv ## Install runtime deps into the venv (editable, with dev extras).
+# Stamp file: re-run pip only when the dependency manifests change, so
+# `make test` doesn't hit the network on every invocation.
+$(VENV)/.installed: pyproject.toml requirements-dev.txt | venv
 	$(PIP) install --upgrade pip wheel
 	$(PIP) install -r requirements-dev.txt
 	$(PIP) install -e .
+	@touch $@
+
+.PHONY: install
+install: $(VENV)/.installed ## Install runtime deps into the venv (editable, with dev extras).
 
 .PHONY: install-runtime
 install-runtime: venv ## Install only the runtime deps (no tests / lint / tui).
@@ -96,56 +104,64 @@ install-runtime: venv ## Install only the runtime deps (no tests / lint / tui).
 # ---------------------------------------------------------------------------
 
 .PHONY: service
-service: install ## Run web UI + sync loop in the foreground.
+service: $(VENV)/.installed ## Run web UI + sync loop in the foreground.
 	PYTHONPATH=. $(PYTHON_BIN) -m $(PACKAGE) service
 
 .PHONY: web
-web: install ## Run only the FastAPI web UI (no background sync).
+web: $(VENV)/.installed ## Run only the FastAPI web UI (no background sync).
 	PYTHONPATH=. $(PYTHON_BIN) -m $(PACKAGE) web
 
 .PHONY: sync
-sync: install ## Run a single sync cycle and exit. Cron-friendly.
+sync: $(VENV)/.installed ## Run a single sync cycle and exit. Cron-friendly.
 	PYTHONPATH=. $(PYTHON_BIN) -m $(PACKAGE) sync --once
 
 .PHONY: tui
-tui: install ## Launch the Textual TUI dashboard.
+tui: $(VENV)/.installed ## Launch the Textual TUI dashboard.
 	PYTHONPATH=. $(PYTHON_BIN) -m $(PACKAGE) tui
 
 .PHONY: check-config
-check-config: install ## Validate settings without starting the service.
+check-config: $(VENV)/.installed ## Validate settings without starting the service.
 	PYTHONPATH=. $(PYTHON_BIN) -m $(PACKAGE) check-config
 
 .PHONY: init
-init: install ## Generate a fresh .env with strong random secrets.
+init: $(VENV)/.installed ## Generate a fresh JSON config with strong random secrets.
 	PYTHONPATH=. $(PYTHON_BIN) -m $(PACKAGE) init
+
+.PHONY: interfaces
+interfaces: $(VENV)/.installed ## List detected network interfaces + default route.
+	PYTHONPATH=. $(PYTHON_BIN) -m $(PACKAGE) interfaces
+
+.PHONY: hosts
+hosts: $(VENV)/.installed ## List managed hosts grouped by interface group.
+	PYTHONPATH=. $(PYTHON_BIN) -m $(PACKAGE) hosts
 
 # ---------------------------------------------------------------------------
 # Quality
 # ---------------------------------------------------------------------------
 
 .PHONY: test
-test: install ## Run the pytest suite.
+test: $(VENV)/.installed ## Run the pytest suite.
 	PYTHONPATH=. $(PYTEST) --tb=short tests/
 
 .PHONY: test-cov
-test-cov: install ## Run pytest with coverage.
+test-cov: $(VENV)/.installed ## Run pytest with coverage.
 	PYTHONPATH=. $(PYTEST) --cov=$(PACKAGE) --cov-report=term-missing --cov-report=xml tests/
 
 .PHONY: test-e2e
-test-e2e: install ## Run end-to-end browser tests against a real uvicorn + Chromium.
+test-e2e: $(VENV)/.installed ## Run end-to-end browser tests against a real uvicorn + Chromium.
 	@command -v '$(PYTHON_BIN)' >/dev/null || (echo "no venv; run 'make install' first"; exit 1)
 	$(PYTHON_BIN) -m playwright install chromium 2>/dev/null || true
 	PYTHONPATH=. $(PYTEST) --no-cov -m e2e --browser chromium tests/e2e_web
 	@echo ">>> Screenshots written to docs/screenshots/"
 
 .PHONY: lint
-lint: install ## Run ruff + mypy.
+lint: $(VENV)/.installed ## Run ruff + mypy (fails on any finding).
 	$(RUFF) check src tests
-	@$(RUFF) format --check src tests || true
-	-$(MYPY) src
+	$(RUFF) format --check src tests
+	$(MYPY) src
 
 .PHONY: format
-format: install ## Auto-format with ruff and apply safe fixes.
+format: $(VENV)/.installed ## Auto-format with ruff and apply safe fixes.
 	$(RUFF) format src tests
 	$(RUFF) check --fix src tests
 
@@ -196,7 +212,8 @@ package: ## Build a native package for the current OS.
 .PHONY: package-freebsd
 package-freebsd: ## Build the FreeBSD .txz via contrib/freebsd/ port skeleton.
 	@command -v bmake >/dev/null 2>&1 || (echo "bmake required on FreeBSD"; exit 1)
-	cd contrib/freebsd && env BATCH=YES DISTDIR=$(PWD)/../../dist bmake package
+	@mkdir -p dist
+	cd contrib/freebsd && env BATCH=YES DISTDIR=$(CURDIR)/dist bmake package
 
 .PHONY: package-debian
 package-debian: ## Build the Debian .deb (requires dpkg-buildpackage).

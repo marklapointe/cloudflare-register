@@ -83,9 +83,16 @@ class Provider(ABC):
 
     @abstractmethod
     async def create_record(
-        self, zone_id: str, record_type: str, name: str, content: str, proxied: bool = False
+        self,
+        zone_id: str,
+        record_type: str,
+        name: str,
+        content: str,
+        proxied: bool = False,
+        *,
+        ttl: int = 1,
     ) -> DnsRecord:
-        """Create a record and return the persisted entity."""
+        """Create a record and return the persisted entity. ``ttl=1`` means automatic."""
 
     @abstractmethod
     async def update_record(
@@ -96,6 +103,8 @@ class Provider(ABC):
         name: str,
         content: str,
         proxied: bool = False,
+        *,
+        ttl: int = 1,
     ) -> DnsRecord:
         """Update an existing record and return the persisted entity."""
 

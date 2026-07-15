@@ -38,9 +38,10 @@ service:
   bound to a specific OS interface, or to the OS default route. Sync runs
   per group, with health-checks before applying.
 - **Bulk add**: Paste a list of hostnames into the wizard; one save.
-- **JWT-protected web UI**: Dashboard + zone-aware wizard for adding hosts.
-- **CSRF-protected forms**: Double-submit cookie + `SameSite=Lax`.
-- **bcrypt-hashed admin password**: Plain-text config is rejected.
+- **JWT-protected web UI**: Dashboard + zone-aware wizard for adding hosts;
+  logout invalidates all outstanding sessions.
+- **CSRF-protected forms**: Session-bound signed tokens + `SameSite=Lax`.
+- **bcrypt-hashed admin password** plus per-IP login throttling.
 - **TUI dashboard**: Keyboard-first status view (`q` quit, `s` sync now,
   `r` refresh).
 - **Cron-friendly mode**: `cloudflare-register sync --once` for systems
@@ -55,12 +56,11 @@ service:
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e .
 
-# 2. Generate a fresh .env (with random secret + password)
-cloudflare-register init
+# 2. Generate a fresh JSON config (random secret + bcrypt-hashed password)
+cloudflare-register init          # writes ~/.config/cloudflare_register/config.json
 
-# 3. Edit .env: set CLOUDFLARE_API_TOKEN at minimum
-$EDITOR .env
-chmod 600 .env
+# 3. Edit the config: set cloudflare_api_token at minimum
+$EDITOR ~/.config/cloudflare_register/config.json
 
 # 4. Validate
 cloudflare-register check-config
@@ -73,12 +73,19 @@ cloudflare-register tui           # TUI dashboard
 cloudflare-register sync          # one cycle, exits (cron-friendly)
 ```
 
-Default paths follow XDG Base Directory:
+Configuration resolution order (highest wins):
+
+1. Process environment variables (also systemd `EnvironmentFile`).
+2. The file named by `$CLOUDFLARE_REGISTER_CONFIG`.
+3. `/etc/cloudflare-register.json` (written by `cloudflare-register init --system`).
+4. `$XDG_CONFIG_HOME/cloudflare_register/config.json` (written by `cloudflare-register init`).
+
+There is deliberately no `.env` support. Default paths follow XDG Base Directory:
 
 | Resource | Path |
 |----------|------|
 | Hosts JSON | `$XDG_DATA_HOME/cloudflare_register/hosts.json` (0600) |
-| Config | `.env` in CWD |
+| Config | `~/.config/cloudflare_register/config.json` (0600) |
 | Cache | `$XDG_CACHE_HOME/cloudflare_register/` |
 
 Override `XDG_DATA_HOME` etc. to relocate.
@@ -121,24 +128,25 @@ make distclean       # also drop caches
 
 ```sh
 cd /usr/ports/dns/cloudflare-register && make install clean
+sudo cloudflare-register init --system     # writes /etc/cloudflare-register.json
+sudo $EDITOR /etc/cloudflare-register.json # set cloudflare_api_token
 sysrc cloudflare_ddns_enable=YES
-$EDITOR /usr/local/etc/cloudflare-register/cloudflare-register.env
-chmod 600 /usr/local/etc/cloudflare-register/cloudflare-register.env
 service cloudflare_ddns start
 ```
 
-(Port skeleton in `contrib/freebsd/`; sample `pkg-plist` included.)
+(Port skeleton in `contrib/freebsd/`; the plist is generated via `autoplist`.)
 
 ### Debian / Ubuntu
 
 ```sh
 sudo dpkg -i cloudflare-register_0.2.0-1_all.deb
-sudo $EDITOR /etc/cloudflare-register/cloudflare-register.env
-sudo systemctl daemon-reload
+sudo cloudflare-register init --system     # writes /etc/cloudflare-register.json
+sudo $EDITOR /etc/cloudflare-register.json # set cloudflare_api_token
 sudo systemctl enable --now cloudflare-ddns
 ```
 
-(`debian/` contains control, rules, postinst, etc.)
+(`debian/` contains control, rules, postinst, etc.; the unit is installed
+and daemon-reloaded by the package.)
 
 ### Other Linux / macOS (generic)
 
@@ -146,7 +154,7 @@ sudo systemctl enable --now cloudflare-ddns
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e .
 cloudflare-register init
-$EDITOR .env
+$EDITOR ~/.config/cloudflare_register/config.json
 cloudflare-register service         # foreground; or run under your supervisor
 ```
 
@@ -164,20 +172,26 @@ on any failure so cron can alert.
 
 ## Configuration
 
-Reference: `.env.example`. Required keys for first run:
+Keys are lowercase in the JSON config file and UPPERCASE as environment
+variables (env vars override the file). `cloudflare-register init` writes a
+config with everything but the API token pre-filled. Required keys for
+first run:
 
-| Key | Required | Default |
-|-----|----------|---------|
-| `CLOUDFLARE_API_TOKEN` | Yes | unset |
-| `SECRET_KEY` | Yes (≥ 32 chars) | placeholder rejected |
-| `ADMIN_PASSWORD` or `ADMIN_PASSWORD_HASH` | Yes | placeholder rejected |
-| `HTTP_HOST` | No | `127.0.0.1` |
-| `HTTP_PORT` | No | `8000` |
-| `COOKIE_SECURE` | No | `false` (set `true` behind HTTPS) |
-| `SYNC_INTERVAL_SECONDS` | No | `300` |
-| `LOG_LEVEL` | No | `INFO` |
+| JSON key / env var | Required | Default |
+|--------------------|----------|---------|
+| `cloudflare_api_token` / `CLOUDFLARE_API_TOKEN` | Yes | placeholder rejected |
+| `secret_key` / `SECRET_KEY` | Yes (≥ 32 chars) | placeholder rejected |
+| `admin_password_hash` (preferred) or `admin_password` | Yes | placeholder rejected |
+| `http_host` / `HTTP_HOST` | No | `127.0.0.1` |
+| `http_port` / `HTTP_PORT` | No | `8000` |
+| `cookie_secure` / `COOKIE_SECURE` | No | `false` (set `true` behind HTTPS) |
+| `sync_interval_seconds` / `SYNC_INTERVAL_SECONDS` | No | `300` |
+| `log_level` / `LOG_LEVEL` | No | `INFO` |
 
-Generate `SECRET_KEY` and `ADMIN_PASSWORD` quickly:
+The sync loop, web UI, and TUI all refuse to start while placeholder
+secrets are in use (`CLOUDFLARE_REGISTER_ALLOW_INSECURE_DEFAULTS=1`
+downgrades that to a warning for throwaway experiments). Generate a fresh
+secret by hand if needed:
 
 ```sh
 python -c 'import secrets; print(secrets.token_urlsafe(48))'
@@ -188,9 +202,9 @@ python -c 'import secrets; print(secrets.token_urlsafe(48))'
 ```
 src/cloudflare_register/
   cli.py              # Click CLI: init, check-config, sync, service, web, tui, interfaces, hosts
-  config.py           # pydantic Settings (XDG-aware)
+  config.py           # pydantic Settings (JSON file + env, XDG-aware)
   exceptions.py       # public exception hierarchy
-  ip_detection.py     # async public IPv4/IPv6 discovery with LRU/TTL cache
+  ip_detection.py     # async public IPv4/IPv6 discovery (family-validated, TTL cache)
   logging_setup.py    # one-time root logger config
   persistence.py      # atomic JSON, flock-guarded, 0600
   sync.py             # backward-compat facade over SyncService
@@ -206,18 +220,20 @@ src/cloudflare_register/
     factory.py        # Factory + registry
   web/
     app.py            # FastAPI app + routes (dashboard, wizard, bulk add, group register)
-    csrf.py           # double-submit-cookie CSRF
-    templates/        # Jinja2 templates (water.css)
+    csrf.py           # session-bound CSRF tokens
+    static/           # vendored water.css (no CDN; CSP is default-src 'self')
+    templates/        # Jinja2 templates
   tui/
     app.py            # Textual dashboard (groups + interfaces + sync)
   __main__.py         # `python -m cloudflare_register`
-contrib/freebsd/      # port skeleton (Makefile, pkg-descr, pkg-plist)
+contrib/freebsd/      # port skeleton (Makefile, pkg-descr, files/)
 debian/               # packaging (control, rules, postinst, ...)
-deploy/               # runtime artefacts (systemd unit, rc.d, env example)
+deploy/               # runtime artefacts (systemd unit, rc.d script)
 tests/                # pytest suite (unit + service + e2e_web/)
-docs/screenshots/     # Playwright E2E output
+docs/screenshots/     # Playwright E2E output (generated; gitignored)
 scripts/
   inject_license.py   # idempotently inserts BSD 3-Clause headers
+  secret-scan         # pre-commit credential scanner
 .plan/                # CloudBSD planning documents
 AGENTS_START_HERE.md  # entry point for autonomous agents
 ```
@@ -234,11 +250,14 @@ The full design lives in `.plan/0200-Architecture.md`. Quick summary:
 - **Factory** in `providers/factory.py` builds the right strategy from a
   configuration string.
 - **Composition root** in `cli.py` wires settings, provider, services.
-- **Bounded LRU/TTL cache** in `ip_detection.py` (TAOCP §6.4 influence).
-- **Atomic persistence** with `os.replace` + `fsync` + `flock`.
-- **Interface groups** bind user labels to OS interfaces; sync runs per group
-  with up-checks via `InterfaceService.resolve_interface`.
-- **psutil 7.x** chosen for BSD-3 licensing + active maintenance + no root
+- **Fail-safe IP detection**: probe responses must parse as an address of the
+  requested family; "all probes failed" is distinguished from "family absent"
+  (kernel route check), and a transient failure never deletes DNS records.
+- **Atomic persistence** with `os.replace` + `fsync` + `flock`; mutations hold
+  the lock across the whole read-modify-write.
+- **Interface groups** bind user labels to OS interfaces; sync runs per group,
+  with probes source-bound to the group's interface address.
+- **psutil** chosen for BSD-3 licensing + active maintenance + no root
   requirement (researched 2026-07).
 
 ## Development
@@ -257,14 +276,23 @@ license headers are maintained by `scripts/inject_license.py` (run
 
 ## Security
 
-- `CLOUDFLARE_API_TOKEN` and `SECRET_KEY` are required at startup. The
-  default-baked placeholders are rejected.
-- `ADMIN_PASSWORD` may be supplied as a bcrypt hash via `ADMIN_PASSWORD_HASH`
-  (preferred for production).
-- `HOSTS_JSON` written mode `0600`.
+- `CLOUDFLARE_API_TOKEN` and `SECRET_KEY` are required at startup: the
+  service, web UI, and TUI raise `ConfigError` while placeholders are in use.
+- Both the username and the password are verified in constant time;
+  `ADMIN_PASSWORD_HASH` (bcrypt) is preferred for production. Failed logins
+  are logged, delayed, and locked out per source IP after repeated failures.
+- Sessions are HS256 JWTs (PyJWT) in an `HttpOnly; SameSite=Lax` cookie;
+  logout bumps a server-side generation counter, invalidating all
+  outstanding tokens.
+- Form submissions require a CSRF token bound to the session
+  (`HMAC(secret_key, session)`), so a planted cookie cannot forge one.
+- Every response carries `Content-Security-Policy: default-src 'self'`,
+  `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`, and
+  authenticated pages are `Cache-Control: no-store`. CSS is vendored, not
+  loaded from a CDN.
+- Hosts/config files are written mode `0600`; data directories `0700`.
 - Service drops from root to a dedicated `cloudflare-ddns` user in
-  systemd/rc.d packaging.
-- Form submissions require a CSRF token (`SameSite=Lax` + double-submit cookie).
+  systemd/rc.d packaging; the systemd unit ships a full hardening block.
 
 See `.plan/0100-Security-Overview.md` for the full threat model.
 

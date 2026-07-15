@@ -19,6 +19,10 @@ from cloudflare_register.persistence import (
     HostConfig as LegacyHostConfig,
 )
 from cloudflare_register.persistence import (
+    groups_mutation_lock,
+    hosts_mutation_lock,
+)
+from cloudflare_register.persistence import (
     load_hosts_config as legacy_load,
 )
 from cloudflare_register.persistence import (
@@ -69,11 +73,12 @@ class HostService:
     # ---- mutating ---------------------------------------------------------
 
     def add_host(self, host: HostConfig) -> HostConfig:
-        existing = self.list_hosts()
-        if any(h.hostname == host.hostname for h in existing):
-            raise PersistenceError(f"hostname {host.hostname} already managed")
-        existing.append(host)
-        legacy_save(existing)
+        with hosts_mutation_lock():
+            existing = self.list_hosts()
+            if any(h.hostname == host.hostname for h in existing):
+                raise PersistenceError(f"hostname {host.hostname} already managed")
+            existing.append(host)
+            legacy_save(existing)
         _LOGGER.info("added host %s in group=%s", host.hostname, host.interface_group or "<none>")
         return host
 
@@ -89,31 +94,33 @@ class HostService:
         whose hostname already exists are skipped (not errored). All additions
         share the same ``interface_group`` if provided.
         """
-        existing = {h.hostname for h in self.list_hosts()}
-        snapshot = self.list_hosts()
         added: list[HostConfig] = []
         skipped: list[tuple[str, str]] = []
-        for hostname, zone_id, zone_name, proxied in hostnames:
-            try:
-                host = HostConfig(
-                    hostname=hostname,
-                    zone_id=zone_id,
-                    zone_name=zone_name,
-                    proxied=proxied,
-                    interface_group=interface_group,
-                )
-            except ValueError as exc:
-                skipped.append((hostname, str(exc)))
-                continue
-            if host.hostname in existing:
-                skipped.append((hostname, "already managed"))
-                continue
-            snapshot.append(host)
-            existing.add(host.hostname)
-            added.append(host)
+        with hosts_mutation_lock():
+            snapshot = self.list_hosts()
+            existing = {h.hostname for h in snapshot}
+            for hostname, zone_id, zone_name, proxied in hostnames:
+                try:
+                    host = HostConfig(
+                        hostname=hostname,
+                        zone_id=zone_id,
+                        zone_name=zone_name,
+                        proxied=proxied,
+                        interface_group=interface_group,
+                    )
+                except ValueError as exc:
+                    skipped.append((hostname, str(exc)))
+                    continue
+                if host.hostname in existing:
+                    skipped.append((hostname, "already managed"))
+                    continue
+                snapshot.append(host)
+                existing.add(host.hostname)
+                added.append(host)
 
+            if added:
+                legacy_save(snapshot)
         if added:
-            legacy_save(snapshot)
             _LOGGER.info(
                 "bulk-added %d host(s) to group=%s", len(added), interface_group or "<none>"
             )
@@ -121,11 +128,12 @@ class HostService:
 
     def remove_host(self, hostname: str) -> bool:
         target = hostname.strip().lower().rstrip(".")
-        current = self.list_hosts()
-        filtered = [h for h in current if h.hostname != target]
-        if len(filtered) == len(current):
-            return False
-        legacy_save(filtered)
+        with hosts_mutation_lock():
+            current = self.list_hosts()
+            filtered = [h for h in current if h.hostname != target]
+            if len(filtered) == len(current):
+                return False
+            legacy_save(filtered)
         _LOGGER.info("removed host %s", target)
         return True
 
@@ -133,21 +141,22 @@ class HostService:
         """Move all hosts currently tagged ``group_name`` to ``new_group``.
 
         Returns the number of hosts reassigned. Used when an interface
-        changes (e.g. switching from eth0 to a VPN tunnel).
+        changes (e.g. switching from eth0 to a VPN tunnel). The new group
+        name goes through the model validator (``validate_assignment``), so
+        an invalid name raises ``ValueError`` before anything is persisted.
         """
         normalized_old = group_name.lower()
-        normalized_new = new_group.lower() if new_group else None
-        current = self.list_hosts()
         moved = 0
-        for host in current:
-            if host.interface_group == normalized_old:
-                host.interface_group = normalized_new
-                moved += 1
+        with hosts_mutation_lock():
+            current = self.list_hosts()
+            for host in current:
+                if host.interface_group == normalized_old:
+                    host.interface_group = new_group  # validated on assignment
+                    moved += 1
+            if moved:
+                legacy_save(current)
         if moved:
-            legacy_save(current)
-            _LOGGER.info(
-                "reassigned %d host(s) from %s to %s", moved, normalized_old, normalized_new
-            )
+            _LOGGER.info("reassigned %d host(s) from %s to %s", moved, normalized_old, new_group)
         return moved
 
     # ---- interface-group registry -----------------------------------------
@@ -199,9 +208,10 @@ class HostService:
             save_interface_groups as legacy_save_groups,
         )
 
-        current = {g.name: g for g in legacy_load_groups()}
-        current[group.name] = group
-        legacy_save_groups(list(current.values()))
+        with groups_mutation_lock():
+            current = {g.name: g for g in legacy_load_groups()}
+            current[group.name] = group
+            legacy_save_groups(list(current.values()))
         _LOGGER.info(
             "registered interface group %s -> %s", group.name, group.interface_name or "<default>"
         )
